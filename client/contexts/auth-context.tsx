@@ -1,74 +1,85 @@
 'use client';
 
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { User, api } from '@/lib/api';
-import { useRouter } from 'next/navigation';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { api, type User } from '@/lib/api';
+import { clearIdentity, loadIdentity, saveIdentity, type StoredIdentity } from '@/lib/crypto/store';
 
-interface AuthContextType {
+interface AuthContextValue {
   user: User | null;
+  identity: StoredIdentity | null;
+  /** true until the stored session has been checked once */
   loading: boolean;
-  login: (email: string, password: string) => Promise<void>;
-  register: (email: string, password: string, name?: string) => Promise<void>;
-  logout: () => void;
+  signIn(user: User, identity: StoredIdentity): Promise<void>;
+  logout(): Promise<void>;
 }
 
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
+const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
+  const [identity, setIdentity] = useState<StoredIdentity | null>(null);
   const [loading, setLoading] = useState(true);
-  const router = useRouter();
+  const channel = useRef<BroadcastChannel | null>(null);
 
-  useEffect(() => {
-    // Check if user is logged in on mount
-    const token = localStorage.getItem('token');
-    if (token) {
-      api.getMe()
-        .then((response) => {
-          setUser(response.data);
-        })
-        .catch(() => {
-          localStorage.removeItem('token');
-        })
-        .finally(() => {
-          setLoading(false);
-        });
-    } else {
-      setLoading(false);
-    }
+  const clear = useCallback(() => {
+    setUser(null);
+    setIdentity(null);
   }, []);
 
-  const login = async (email: string, password: string) => {
-    const response = await api.login(email, password);
-    localStorage.setItem('token', response.data.token);
-    setUser(response.data.user);
-    router.push('/messages');
-  };
+  useEffect(() => {
+    channel.current = new BroadcastChannel('messenger-auth');
+    channel.current.onmessage = () => {
+      api.clearAccessToken();
+      clear();
+    };
+    api.onSessionExpired = clear;
 
-  const register = async (email: string, password: string, name?: string) => {
-    const response = await api.register(email, password, name);
-    localStorage.setItem('token', response.data.token);
-    setUser(response.data.user);
-    router.push('/messages');
-  };
+    (async () => {
+      try {
+        const stored = await loadIdentity();
+        if (stored && (await api.refresh())) {
+          setUser(await api.me());
+          setIdentity(stored);
+        } else if (stored) {
+          await clearIdentity();
+        }
+      } catch {
+        // the API is unreachable; the next sign-in attempt will surface that
+      } finally {
+        setLoading(false);
+      }
+    })();
 
-  const logout = () => {
-    localStorage.removeItem('token');
-    setUser(null);
-    router.push('/login');
-  };
+    return () => {
+      channel.current?.close();
+      api.onSessionExpired = null;
+    };
+  }, [clear]);
 
-  return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
-      {children}
-    </AuthContext.Provider>
-  );
+  const signIn = useCallback(async (nextUser: User, nextIdentity: StoredIdentity) => {
+    await saveIdentity(nextIdentity);
+    setUser(nextUser);
+    setIdentity(nextIdentity);
+  }, []);
+
+  const logout = useCallback(async () => {
+    // local state goes regardless of whether the server heard about it
+    await Promise.all([api.logout().catch(() => undefined), clearIdentity()]);
+    channel.current?.postMessage('logout');
+    clear();
+  }, [clear]);
+
+  const value = useMemo(() => ({ user, identity, loading, signIn, logout }), [user, identity, loading, signIn, logout]);
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
-export function useAuth() {
+export function useAuth(): AuthContextValue {
   const context = useContext(AuthContext);
-  if (context === undefined) {
+
+  if (!context) {
     throw new Error('useAuth must be used within an AuthProvider');
   }
+
   return context;
 }

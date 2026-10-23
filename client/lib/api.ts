@@ -1,126 +1,237 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+import type { KdfParams } from '@/lib/crypto/kdf';
+import type { CredentialUpdate } from '@/lib/crypto/keys';
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3000';
 
 export interface User {
-  id: number;
+  id: string;
   email: string;
   name: string | null;
+}
+
+export interface Session {
+  accessToken: string;
+  user: User;
+}
+
+export interface LoginResult extends Session {
+  kdf: KdfParams;
+  keyBundle: string;
+  keyBundleNonce: string;
+  keys: { version: number; x25519Pub: string; ed25519Pub: string };
+}
+
+export interface UserKey {
+  version: number;
+  x25519Pub: string;
+  ed25519Pub: string;
   createdAt: string;
+  retiredAt: string | null;
 }
 
-export interface Message {
-  id: number;
-  content: string;
-  createdAt: string;
-  updatedAt: string;
-  authorId: number;
-  author: {
-    id: number;
-    email: string;
-    name: string | null;
-  };
+export type EmailPurpose = 'VERIFY' | 'LOGIN' | 'RECOVER';
+
+export interface RegisterInput {
+  email: string;
+  name?: string;
+  authKey: string;
+  kdf: KdfParams;
+  x25519Pub: string;
+  ed25519Pub: string;
+  keyBundle: string;
+  keyBundleNonce: string;
+  recoveryBundle: string;
+  recoveryBundleNonce: string;
+  inviteToken?: string;
+  emailProof?: string;
 }
 
-export interface AuthResponse {
-  success: boolean;
-  data: {
-    token: string;
-    user: User;
-  };
+export interface RecoverInput extends CredentialUpdate {
+  emailProof: string;
+  signature: string;
 }
 
-export interface MessagesResponse {
-  success: boolean;
-  data: Message[];
+export interface ResetIdentityInput extends CredentialUpdate {
+  emailProof: string;
+  x25519Pub: string;
+  ed25519Pub: string;
+  recoveryBundle: string;
+  recoveryBundleNonce: string;
 }
 
-export interface MessageResponse {
-  success: boolean;
-  data: Message;
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly issues: { path: string; message: string }[] = [],
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
 }
 
-export interface ErrorResponse {
-  success: false;
-  error: string;
+interface RequestOptions {
+  method?: string;
+  body?: unknown;
+  /** false for endpoints that take no bearer token, so their own 401s never trigger a refresh */
+  auth?: boolean;
 }
 
 class ApiClient {
-  private getToken(): string | null {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('token');
+  private accessToken: string | null = null;
+
+  /** Set by the auth provider; called when the refresh cookie stops working */
+  onSessionExpired: (() => void) | null = null;
+
+  private async send<T>(path: string, { method = 'GET', body, auth = true }: RequestOptions): Promise<T> {
+    const headers: Record<string, string> = {};
+    if (body !== undefined) {
+      headers['Content-Type'] = 'application/json';
     }
-    return null;
-  }
-
-  private async request<T>(
-    endpoint: string,
-    options: RequestInit = {}
-  ): Promise<T> {
-    const token = this.getToken();
-    const headers: HeadersInit = {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    };
-
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
+    if (auth && this.accessToken) {
+      headers.Authorization = `Bearer ${this.accessToken}`;
     }
 
-    const response = await fetch(`${API_URL}${endpoint}`, {
-      ...options,
+    const res = await fetch(`${API_URL}${path}`, {
+      method,
       headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      credentials: 'include',
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || 'Something went wrong');
+    if (res.status === 204) {
+      return undefined as T;
     }
 
-    return data;
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new ApiError(res.status, data.error ?? 'Request failed', data.issues);
+    }
+
+    return data.data as T;
   }
 
-  // Auth endpoints
-  async register(email: string, password: string, name?: string): Promise<AuthResponse> {
-    return this.request<AuthResponse>('/api/auth/register', {
+  private async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    const tokenBefore = this.accessToken;
+
+    try {
+      return await this.send<T>(path, options);
+    } catch (error) {
+      if (options.auth === false || !(error instanceof ApiError) || error.status !== 401) {
+        throw error;
+      }
+    }
+
+    if (!(await this.refresh(tokenBefore))) {
+      this.onSessionExpired?.();
+      throw new ApiError(401, 'Session expired');
+    }
+
+    return this.send<T>(path, options);
+  }
+
+  /** Trades the refresh cookie for a new access token; the lock keeps concurrent 401s and other tabs from racing */
+  async refresh(staleToken: string | null = this.accessToken): Promise<boolean> {
+    return await navigator.locks.request('messenger-refresh', async () => {
+      if (this.accessToken !== staleToken) {
+        return true;
+      }
+
+      try {
+        const { accessToken } = await this.send<{ accessToken: string }>('/api/auth/refresh', { method: 'POST', auth: false });
+        this.accessToken = accessToken;
+        return true;
+      } catch (error) {
+        if (error instanceof ApiError) {
+          this.accessToken = null;
+          return false;
+        }
+        throw error;
+      }
+    });
+  }
+
+  clearAccessToken(): void {
+    this.accessToken = null;
+  }
+
+  async getKdfParams(email: string): Promise<KdfParams> {
+    const { kdf } = await this.request<{ kdf: KdfParams }>(`/api/auth/params?email=${encodeURIComponent(email)}`, {
+      auth: false,
+    });
+
+    return kdf;
+  }
+
+  sendEmailCode(email: string, purpose: EmailPurpose): Promise<void> {
+    return this.request('/api/auth/email-code', { method: 'POST', body: { email, purpose }, auth: false });
+  }
+
+  async verifyEmailCode(email: string, purpose: EmailPurpose, code: string): Promise<string> {
+    const { proof } = await this.request<{ proof: string }>('/api/auth/verify', {
       method: 'POST',
-      body: JSON.stringify({ email, password, name }),
+      body: { email, purpose, code },
+      auth: false,
     });
+
+    return proof;
   }
 
-  async login(email: string, password: string): Promise<AuthResponse> {
-    return this.request<AuthResponse>('/api/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ email, password }),
-    });
+  async register(input: RegisterInput): Promise<Session> {
+    const session = await this.request<Session>('/api/auth/register', { method: 'POST', body: input, auth: false });
+    this.accessToken = session.accessToken;
+
+    return session;
   }
 
-  async getMe(): Promise<{ success: boolean; data: User }> {
-    return this.request<{ success: boolean; data: User }>('/api/auth/me');
+  async login(email: string, authKey: string): Promise<LoginResult> {
+    const result = await this.request<LoginResult>('/api/auth/login', { method: 'POST', body: { email, authKey }, auth: false });
+    this.accessToken = result.accessToken;
+
+    return result;
   }
 
-  // Message endpoints
-  async getMessages(): Promise<MessagesResponse> {
-    return this.request<MessagesResponse>('/api/messages');
+  async logout(): Promise<void> {
+    try {
+      await this.request('/api/auth/refresh', { method: 'DELETE', auth: false });
+    } finally {
+      this.accessToken = null;
+    }
   }
 
-  async createMessage(content: string): Promise<MessageResponse> {
-    return this.request<MessageResponse>('/api/messages', {
-      method: 'POST',
-      body: JSON.stringify({ content }),
-    });
+  me(): Promise<User> {
+    return this.request<User>('/api/auth/me');
   }
 
-  async updateMessage(id: number, content: string): Promise<MessageResponse> {
-    return this.request<MessageResponse>(`/api/messages/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify({ content }),
-    });
+  getRecoveryBundle(emailProof: string): Promise<{ recoveryBundle: string; recoveryBundleNonce: string }> {
+    return this.request('/api/auth/recover/bundle', { method: 'POST', body: { emailProof }, auth: false });
   }
 
-  async deleteMessage(id: number): Promise<{ success: boolean; message: string }> {
-    return this.request<{ success: boolean; message: string }>(`/api/messages/${id}`, {
-      method: 'DELETE',
-    });
+  async recover(input: RecoverInput): Promise<Session> {
+    const session = await this.request<Session>('/api/auth/recover', { method: 'POST', body: input, auth: false });
+    this.accessToken = session.accessToken;
+
+    return session;
+  }
+
+  async resetIdentity(input: ResetIdentityInput): Promise<Session> {
+    const session = await this.request<Session>('/api/auth/reset-identity', { method: 'POST', body: input, auth: false });
+    this.accessToken = session.accessToken;
+
+    return session;
+  }
+
+  getUserKeys(userId: string): Promise<UserKey[]> {
+    return this.request<UserKey[]>(`/api/users/${encodeURIComponent(userId)}/keys`);
+  }
+
+  createInvite(email: string): Promise<{ id: string; expiresAt: string }> {
+    return this.request('/api/invites', { method: 'POST', body: { email } });
+  }
+
+  getInvite(token: string): Promise<{ email: string; expiresAt: string }> {
+    return this.request(`/api/invites/${encodeURIComponent(token)}`, { auth: false });
   }
 }
 

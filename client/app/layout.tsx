@@ -1,21 +1,19 @@
-import type { Metadata } from "next";
-import { AuthProvider } from "@/contexts/auth-context";
-import "./globals.css";
+import type { Metadata } from 'next';
+import type { ReactNode } from 'react';
+import '@fontsource-variable/inter';
+import './fonts.css';
+import { Providers } from './providers';
 
 export const metadata: Metadata = {
-  title: "Messaging App",
-  description: "Simple messaging application",
+  title: 'Messenger',
+  description: 'End-to-end encrypted messages for friends',
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body>
-        <AuthProvider>{children}</AuthProvider>
+        <Providers>{children}</Providers>
       </body>
     </html>
   );
