@@ -153,6 +153,10 @@ Base URL: `http://localhost:3000`. Every response is `{ success, data }` or `{ s
 | `POST` | `/api/auth/refresh` | `refresh` cookie | Rotate the refresh token, return a new access token |
 | `DELETE` | `/api/auth/refresh` | `refresh` cookie | Log out (revoke the session) |
 | `GET` | `/api/auth/me` | Bearer | Current user |
+| `PUT` | `/api/auth/password` | Bearer | New auth key and re-encrypted key bundle, signed by the current identity key; logs out other sessions |
+| `POST` | `/api/auth/recover/bundle` | `RECOVER` proof | The key bundle sealed under the recovery key |
+| `POST` | `/api/auth/recover` | `RECOVER` proof | Forgot password: new credentials signed by the recovered identity key; logs out everywhere |
+| `POST` | `/api/auth/reset-identity` | `RECOVER` proof | Lost recovery key: new identity keys, old ones retired, logs out everywhere |
 
 ### Invites and users
 

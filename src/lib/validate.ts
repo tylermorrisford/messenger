@@ -30,3 +30,12 @@ export function validateBody<S extends z.ZodType>(
     next();
   };
 }
+
+// 64-byte Ed25519 signature, base64-encoded
+export const signatureSchema = z.base64().length(88);
+
+export const kdfSchema = z.object({
+  version: z.literal(1),
+  memLimit: z.int().positive(),
+  opsLimit: z.int().positive(),
+});

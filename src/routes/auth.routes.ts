@@ -4,10 +4,11 @@ import { EmailCodePurpose } from '@prisma/client';
 import { getKdfParams, getUserById, loginUser, registerUser } from '../auth/user.js';
 import { createSession, REFRESH_TTL_MS, revokeSession, rotateSession } from '../api/sessions.js';
 import { issueEmailCode, verifyEmailCode } from '../api/email-codes.js';
+import { changePassword, getRecoveryBundle, recoverAccount, resetIdentity } from '../api/credentials.js';
 import { authenticate, requireUser } from '../middleware/auth.middleware.js';
 import { env } from '../lib/env.js';
 import { HttpError } from '../lib/http-error.js';
-import { base64Schema, emailSchema, key32Schema, validateBody } from '../lib/validate.js';
+import { base64Schema, emailSchema, kdfSchema, key32Schema, signatureSchema, validateBody } from '../lib/validate.js';
 
 const router = Router();
 
@@ -33,11 +34,7 @@ const registerSchema = z.object({
   email: emailSchema,
   name: z.string().optional(),
   authKey: key32Schema,
-  kdf: z.object({
-    version: z.literal(1),
-    memLimit: z.int().positive(),
-    opsLimit: z.int().positive(),
-  }),
+  kdf: kdfSchema,
   x25519Pub: key32Schema,
   ed25519Pub: key32Schema,
   keyBundle: base64Schema,
@@ -165,6 +162,72 @@ router.get('/me', authenticate, async (req, res): Promise<void> => {
   }
 
   res.json({ success: true, data: user });
+});
+
+const credentialSchema = z.object({
+  authKey: key32Schema,
+  kdf: kdfSchema,
+  keyBundle: base64Schema,
+  keyBundleNonce: base64Schema,
+});
+
+const signedCredentialSchema = credentialSchema.extend({ signature: signatureSchema });
+
+const proofSchema = z.object({ emailProof: z.string().min(1) });
+
+const recoverSchema = signedCredentialSchema.extend(proofSchema.shape);
+
+const resetIdentitySchema = credentialSchema.extend({
+  ...proofSchema.shape,
+  x25519Pub: key32Schema,
+  ed25519Pub: key32Schema,
+  recoveryBundle: base64Schema,
+  recoveryBundleNonce: base64Schema,
+});
+
+/**
+ * PUT /api/auth/password
+ * New auth key and re-encrypted key bundle, signed by the current identity key; other sessions are logged out
+ */
+router.put('/password', authenticate, validateBody(signedCredentialSchema), async (req, res): Promise<void> => {
+  const { userId, sessionId } = requireUser(req);
+  await changePassword(userId, sessionId, req.body);
+
+  res.status(204).end();
+});
+
+/**
+ * POST /api/auth/recover/bundle
+ * The key bundle sealed under the recovery key, for a caller holding a RECOVER proof
+ */
+router.post('/recover/bundle', validateBody(proofSchema), async (req, res): Promise<void> => {
+  res.json({ success: true, data: await getRecoveryBundle(req.body.emailProof) });
+});
+
+/**
+ * POST /api/auth/recover
+ * Forgot password: new credentials signed by the identity key unlocked with the recovery key; every session is logged out
+ */
+router.post('/recover', validateBody(recoverSchema), async (req, res): Promise<void> => {
+  const { emailProof, ...update } = req.body;
+  const user = await recoverAccount(emailProof, update);
+  const session = await createSession(user.id, req.headers['user-agent']);
+
+  setRefreshCookie(res, session.refreshToken);
+  res.json({ success: true, data: { accessToken: session.accessToken, user } });
+});
+
+/**
+ * POST /api/auth/reset-identity
+ * Lost recovery key: brand new identity keys, old ones retired, every session logged out
+ */
+router.post('/reset-identity', validateBody(resetIdentitySchema), async (req, res): Promise<void> => {
+  const { emailProof, ...reset } = req.body;
+  const user = await resetIdentity(emailProof, reset);
+  const session = await createSession(user.id, req.headers['user-agent']);
+
+  setRefreshCookie(res, session.refreshToken);
+  res.json({ success: true, data: { accessToken: session.accessToken, user } });
 });
 
 export default router;

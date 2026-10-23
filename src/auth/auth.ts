@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, createPublicKey, randomBytes, verify } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import type { EmailCodePurpose } from '@prisma/client';
@@ -24,6 +24,19 @@ export function randomToken(): string {
 
 export function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
+}
+
+export function verifyEd25519(publicKey: string, message: string, signature: string): boolean {
+  try {
+    const key = createPublicKey({
+      key: { kty: 'OKP', crv: 'Ed25519', x: Buffer.from(publicKey, 'base64').toString('base64url') },
+      format: 'jwk',
+    });
+
+    return verify(null, Buffer.from(message), key, Buffer.from(signature, 'base64'));
+  } catch {
+    return false;
+  }
 }
 
 export function signAccessToken(claims: AccessClaims): string {
