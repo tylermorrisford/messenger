@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
+    "invite": "tsx src/scripts/invite.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

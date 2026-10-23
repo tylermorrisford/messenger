@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import app from '../server.js';
 import { env } from '../lib/env.js';
 import { prisma } from '../lib/prisma.js';
+import { issueInvite } from '../api/invites.js';
 import { b64, lastEmailText, registrationBody, signUp } from '../test/helpers.js';
 
 let alice: Awaited<ReturnType<typeof signUp>>;
@@ -110,5 +111,21 @@ describe('invite-only registration', () => {
       .post('/api/auth/register')
       .send({ ...registrationBody('bob@example.com', b64(32)), inviteToken: token });
     expect(res.status).toBe(400);
+  });
+});
+
+describe('invites issued without an inviter', () => {
+  it('let the invitee register', async () => {
+    const { link } = await issueInvite('bob@example.com', null);
+    const token = new URL(link).searchParams.get('token');
+
+    const shown = await request(app).get(`/api/invites/${token}`);
+    expect(shown.status).toBe(200);
+    expect(shown.body.data.email).toBe('bob@example.com');
+
+    const registered = await request(app)
+      .post('/api/auth/register')
+      .send({ ...registrationBody('bob@example.com', b64(32)), inviteToken: token });
+    expect(registered.status).toBe(201);
   });
 });

@@ -91,13 +91,13 @@ model Invite {
   tokenHash        String    @unique
   email            String
   conversationId   String?
-  inviterId        String
+  inviterId        String?
   expiresAt        DateTime
   acceptedAt       DateTime?
   acceptedByUserId String?
   createdAt        DateTime  @default(now())
 
-  inviter    User  @relation("InviteInviter", fields: [inviterId], references: [id], onDelete: Cascade)
+  inviter    User? @relation("InviteInviter", fields: [inviterId], references: [id], onDelete: Cascade)
   acceptedBy User? @relation("InviteAcceptedBy", fields: [acceptedByUserId], references: [id], onDelete: SetNull)
 
   @@index([email])
