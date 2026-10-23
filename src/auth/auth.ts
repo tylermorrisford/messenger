@@ -1,36 +1,71 @@
+import { createHash, randomBytes } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import type { EmailCodePurpose } from '@prisma/client';
 import { env } from '../lib/env.js';
 
-// Hash password
+export interface AccessClaims {
+  userId: string;
+  sessionId: string;
+}
+
 export async function hashPassword(password: string): Promise<string> {
   const salt = await bcrypt.genSalt(10);
   return bcrypt.hash(password, salt);
 }
 
-// Verify password
-export async function verifyPassword(
-  password: string,
-  hashedPassword: string
-): Promise<boolean> {
+export async function verifyPassword(password: string, hashedPassword: string): Promise<boolean> {
   return bcrypt.compare(password, hashedPassword);
 }
 
-// Generate JWT token
-export function generateToken(userId: number, email: string): string {
-  return jwt.sign(
-    { userId, email },
-    env.JWT_SECRET,
-    { expiresIn: env.JWT_EXPIRES_IN }
-  );
+export function randomToken(): string {
+  return randomBytes(32).toString('base64url');
 }
 
-// Verify JWT token
-export function verifyToken(token: string): { userId: number; email: string } | null {
+export function hashToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+export function signAccessToken(claims: AccessClaims): string {
+  return jwt.sign({ sid: claims.sessionId }, env.JWT_SECRET, {
+    subject: claims.userId,
+    audience: 'access',
+    expiresIn: env.JWT_EXPIRES_IN,
+  });
+}
+
+export function verifyAccessToken(token: string): AccessClaims | null {
   try {
-    const decoded = jwt.verify(token, env.JWT_SECRET) as { userId: number; email: string };
-    return decoded;
-  } catch (error) {
+    const payload = jwt.verify(token, env.JWT_SECRET, { audience: 'access' });
+
+    if (typeof payload === 'string' || typeof payload.sub !== 'string' || typeof payload.sid !== 'string') {
+      return null;
+    }
+
+    return { userId: payload.sub, sessionId: payload.sid };
+  } catch {
+    return null;
+  }
+}
+
+export function signEmailProof(email: string, purpose: EmailCodePurpose): string {
+  return jwt.sign({ purpose }, env.JWT_SECRET, {
+    subject: email,
+    audience: 'email-proof',
+    expiresIn: '15m',
+  });
+}
+
+export function verifyEmailProof(token: string, purpose: EmailCodePurpose): string | null {
+  try {
+    const payload = jwt.verify(token, env.JWT_SECRET, { audience: 'email-proof' });
+
+    if (typeof payload === 'string' || typeof payload.sub !== 'string' || payload.purpose !== purpose) {
+      return null;
+    }
+
+    return payload.sub;
+  } catch {
     return null;
   }
 }

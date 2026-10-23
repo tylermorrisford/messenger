@@ -18,5 +18,5 @@ it('exposes the parsed environment', async () => {
   const { env } = await import('./env.js');
 
   expect(env.NODE_ENV).toBe('test');
-  expect(env.JWT_EXPIRES_IN).toBe('7d');
+  expect(env.JWT_EXPIRES_IN).toBe('15m');
 });

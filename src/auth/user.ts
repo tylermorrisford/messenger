@@ -1,121 +1,164 @@
 import { prisma } from '../lib/prisma.js';
-import { hashPassword, verifyPassword, generateToken } from './auth.js';
+import { env } from '../lib/env.js';
+import { HttpError } from '../lib/http-error.js';
+import { findOpenInvite } from '../api/invites.js';
+import { hashPassword, verifyEmailProof, verifyPassword } from './auth.js';
+
+export interface KdfParams {
+  version: number;
+  memLimit: number;
+  opsLimit: number;
+}
+
+export const KDF_DEFAULTS: KdfParams = { version: 1, memLimit: 64 * 1024 * 1024, opsLimit: 3 };
+
+// a real bcrypt hash of nothing, so a login for an unknown email takes as long as a wrong key
+const UNKNOWN_USER_HASH = '$2b$10$5a9.rkKr1sERHonh.wAtq.VtXeHR5AeFBBv3pKjEmu3qMh9mR6cK.';
+
+export interface PublicUser {
+  id: string;
+  email: string;
+  name: string | null;
+}
 
 export interface RegisterInput {
   email: string;
-  password: string;
   name?: string;
+  authKey: string;
+  kdf: KdfParams;
+  x25519Pub: string;
+  ed25519Pub: string;
+  keyBundle: string;
+  keyBundleNonce: string;
+  recoveryBundle: string;
+  recoveryBundleNonce: string;
+  inviteToken?: string;
+  emailProof?: string;
+}
+
+export async function registerUser(input: RegisterInput): Promise<PublicUser> {
+  const invite = input.inviteToken ? await findOpenInvite(input.inviteToken) : null;
+
+  if (input.inviteToken && (!invite || invite.email !== input.email)) {
+    throw new HttpError(400, 'This invite is invalid or has expired');
+  }
+
+  if (!invite) {
+    if (env.REGISTRATION_MODE !== 'open') {
+      throw new HttpError(403, 'Registration is invite-only');
+    }
+    if (!input.emailProof || verifyEmailProof(input.emailProof, 'VERIFY') !== input.email) {
+      throw new HttpError(400, 'Email verification required');
+    }
+  }
+
+  if (await prisma.user.findUnique({ where: { email: input.email } })) {
+    throw new HttpError(409, 'That email already has an account');
+  }
+
+  const authHash = await hashPassword(input.authKey);
+  const now = new Date();
+
+  return prisma.$transaction(async (tx) => {
+    const user = await tx.user.create({
+      data: {
+        email: input.email,
+        name: input.name ?? null,
+        emailVerifiedAt: now,
+        authHash,
+        kdfVersion: input.kdf.version,
+        kdfMemLimit: input.kdf.memLimit,
+        kdfOpsLimit: input.kdf.opsLimit,
+        keyBundle: input.keyBundle,
+        keyBundleNonce: input.keyBundleNonce,
+        recoveryBundle: input.recoveryBundle,
+        recoveryBundleNonce: input.recoveryBundleNonce,
+        keys: {
+          create: { version: 1, x25519Pub: input.x25519Pub, ed25519Pub: input.ed25519Pub },
+        },
+      },
+      select: { id: true, email: true, name: true },
+    });
+
+    if (invite) {
+      const accepted = await tx.invite.updateMany({
+        where: { id: invite.id, acceptedAt: null },
+        data: { acceptedAt: now, acceptedByUserId: user.id },
+      });
+      if (accepted.count === 0) {
+        throw new HttpError(400, 'This invite is invalid or has expired');
+      }
+    }
+
+    return user;
+  });
 }
 
 export interface LoginInput {
   email: string;
-  password: string;
+  authKey: string;
 }
 
-export interface AuthResponse {
-  token: string;
-  user: {
-    id: number;
-    email: string;
-    name: string | null;
-  };
+export interface LoginResult {
+  user: PublicUser;
+  kdf: KdfParams;
+  keyBundle: string;
+  keyBundleNonce: string;
+  keys: { version: number; x25519Pub: string; ed25519Pub: string };
 }
 
-// Register a new user
-export async function registerUser(input: RegisterInput): Promise<AuthResponse> {
-  const { email, password, name } = input;
-
-  // Check if user already exists
-  const existingUser = await prisma.user.findUnique({
-    where: { email },
+export async function loginUser(input: LoginInput): Promise<LoginResult> {
+  const user = await prisma.user.findUnique({
+    where: { email: input.email },
+    include: {
+      keys: {
+        where: { retiredAt: null },
+        orderBy: { version: 'desc' },
+        take: 1,
+        select: { version: true, x25519Pub: true, ed25519Pub: true },
+      },
+    },
   });
 
-  if (existingUser) {
-    throw new Error('User with this email already exists');
+  const valid = await verifyPassword(input.authKey, user?.authHash ?? UNKNOWN_USER_HASH);
+
+  if (!user || !valid) {
+    throw new HttpError(401, 'Invalid email or password');
   }
 
-  // Hash password
-  const hashedPassword = await hashPassword(password);
-
-  // Create user
-  const user = await prisma.user.create({
-    data: {
-      email,
-      password: hashedPassword,
-      name: name || null,
-    },
-  });
-
-  // Generate token
-  const token = generateToken(user.id, user.email);
+  const [keys] = user.keys;
 
   return {
-    token,
-    user: {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-    },
+    user: { id: user.id, email: user.email, name: user.name },
+    kdf: { version: user.kdfVersion, memLimit: user.kdfMemLimit, opsLimit: user.kdfOpsLimit },
+    keyBundle: user.keyBundle,
+    keyBundleNonce: user.keyBundleNonce,
+    keys,
   };
 }
 
-// Login user
-export async function loginUser(input: LoginInput): Promise<AuthResponse> {
-  const { email, password } = input;
-
-  // Find user
+export async function getKdfParams(email: string): Promise<KdfParams> {
   const user = await prisma.user.findUnique({
     where: { email },
+    select: { kdfVersion: true, kdfMemLimit: true, kdfOpsLimit: true },
   });
 
-  if (!user) {
-    throw new Error('Invalid email or password');
-  }
-
-  // Verify password
-  const isValid = await verifyPassword(password, user.password);
-
-  if (!isValid) {
-    throw new Error('Invalid email or password');
-  }
-
-  // Generate token
-  const token = generateToken(user.id, user.email);
-
-  return {
-    token,
-    user: {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-    },
-  };
+  return user
+    ? { version: user.kdfVersion, memLimit: user.kdfMemLimit, opsLimit: user.kdfOpsLimit }
+    : KDF_DEFAULTS;
 }
 
-// Get user by ID
-export async function getUserById(userId: number) {
+export async function getUserById(userId: string) {
   return prisma.user.findUnique({
     where: { id: userId },
-    select: {
-      id: true,
-      email: true,
-      name: true,
-      createdAt: true,
-    },
+    select: { id: true, email: true, name: true, emailVerifiedAt: true, isAdmin: true, createdAt: true },
   });
 }
 
-// Get all users (for admin purposes)
-export async function getAllUsers() {
-  return prisma.user.findMany({
-    select: {
-      id: true,
-      email: true,
-      name: true,
-      createdAt: true,
-    },
-    orderBy: {
-      createdAt: 'desc',
-    },
+export async function getUserKeys(userId: string) {
+  return prisma.userKey.findMany({
+    where: { userId },
+    orderBy: { version: 'asc' },
+    select: { version: true, x25519Pub: true, ed25519Pub: true, createdAt: true, retiredAt: true },
   });
 }

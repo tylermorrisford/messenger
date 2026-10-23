@@ -1,11 +1,14 @@
-import express, { Request, Response, NextFunction } from 'express';
+import express, { type NextFunction, type Request, type Response } from 'express';
+import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import { env } from './lib/env.js';
 import { prisma } from './lib/prisma.js';
+import { HttpError } from './lib/http-error.js';
 import authRoutes from './routes/auth.routes.js';
-import messageRoutes from './routes/message.routes.js';
+import inviteRoutes from './routes/invite.routes.js';
+import userRoutes from './routes/user.routes.js';
 
 // Create Express app
 const app = express();
@@ -13,11 +16,12 @@ const PORT = env.PORT;
 
 // Security middleware
 app.use(helmet()); // Security headers
-app.use(cors()); // Enable CORS for all origins (configure for production)
+app.use(cors({ origin: env.APP_ORIGIN, credentials: true }));
 
 // Request parsing
 app.use(express.json()); // Parse JSON bodies
 app.use(express.urlencoded({ extended: true })); // Parse URL-encoded bodies
+app.use(cookieParser());
 
 // Logging
 if (env.NODE_ENV !== 'test') {
@@ -45,34 +49,8 @@ app.get('/health', async (req: Request, res: Response) => {
 
 // API routes
 app.use('/api/auth', authRoutes);
-app.use('/api/messages', messageRoutes);
-
-// Root endpoint
-app.get('/', (req: Request, res: Response) => {
-  res.json({
-    success: true,
-    message: 'Welcome to the Messaging API',
-    version: '1.0.0',
-    endpoints: {
-      health: 'GET /health',
-      auth: {
-        register: 'POST /api/auth/register',
-        login: 'POST /api/auth/login',
-        me: 'GET /api/auth/me (requires auth)',
-        users: 'GET /api/auth/users (requires auth)',
-      },
-      messages: {
-        getAll: 'GET /api/messages',
-        getOne: 'GET /api/messages/:id',
-        getByUser: 'GET /api/messages/user/:userId',
-        create: 'POST /api/messages (requires auth)',
-        update: 'PUT /api/messages/:id (requires auth)',
-        delete: 'DELETE /api/messages/:id (requires auth)',
-      },
-    },
-    documentation: 'See README.md for detailed API documentation',
-  });
-});
+app.use('/api/invites', inviteRoutes);
+app.use('/api/users', userRoutes);
 
 // 404 handler
 app.use((req: Request, res: Response) => {
@@ -84,12 +62,17 @@ app.use((req: Request, res: Response) => {
 });
 
 // Global error handler
-app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
+  if (err instanceof HttpError) {
+    res.status(err.status).json({ success: false, error: err.message });
+    return;
+  }
+
   console.error('Error:', err);
 
   res.status(500).json({
     success: false,
-    error: env.NODE_ENV === 'production'
+    error: env.NODE_ENV === 'production' || !(err instanceof Error)
       ? 'Internal server error'
       : err.message,
   });
@@ -99,7 +82,6 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
 if (env.NODE_ENV !== 'test') {
   app.listen(PORT, () => {
     console.log(`\n🚀 Server is running on http://localhost:${PORT}`);
-    console.log(`📚 API Documentation: http://localhost:${PORT}`);
     console.log(`💚 Health check: http://localhost:${PORT}/health\n`);
   });
 }

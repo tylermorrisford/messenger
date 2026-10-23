@@ -3,6 +3,11 @@ import { z } from 'zod';
 
 export const emailSchema = z.string().trim().toLowerCase().pipe(z.email());
 
+// 32 raw bytes, base64-encoded
+export const key32Schema = z.base64().length(44);
+
+export const base64Schema = z.base64().max(16_384);
+
 export function validateBody<S extends z.ZodType>(
   schema: S,
 ): RequestHandler<Record<string, string>, unknown, z.output<S>> {

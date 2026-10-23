@@ -269,11 +269,19 @@ DATABASE_URL="postgresql://msguser:CHANGE_THIS_PASSWORD@localhost:5432/messaging
 
 # JWT Configuration
 JWT_SECRET="CHANGE_THIS_TO_A_SECURE_RANDOM_STRING_AT_LEAST_32_CHARACTERS_LONG"
-JWT_EXPIRES_IN="7d"
+JWT_EXPIRES_IN="15m"
 
 # Server Configuration
 PORT="3000"
 NODE_ENV="production"
+APP_ORIGIN="https://app.example.com"
+
+# Sign-up
+REGISTRATION_MODE="invite"
+
+# Email (Resend; required in production)
+RESEND_API_KEY="re_CHANGE_THIS"
+EMAIL_FROM="Messenger <noreply@example.com>"
 ```
 
 **Important**:
