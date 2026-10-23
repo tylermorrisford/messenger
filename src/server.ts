@@ -2,16 +2,14 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
-import dotenv from 'dotenv';
+import { env } from './lib/env.js';
+import { prisma } from './lib/prisma.js';
 import authRoutes from './routes/auth.routes.js';
 import messageRoutes from './routes/message.routes.js';
 
-// Load environment variables
-dotenv.config();
-
 // Create Express app
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = env.PORT;
 
 // Security middleware
 app.use(helmet()); // Security headers
@@ -22,12 +20,22 @@ app.use(express.json()); // Parse JSON bodies
 app.use(express.urlencoded({ extended: true })); // Parse URL-encoded bodies
 
 // Logging
-if (process.env.NODE_ENV !== 'test') {
+if (env.NODE_ENV !== 'test') {
   app.use(morgan('dev')); // HTTP request logger
 }
 
 // Health check endpoint
-app.get('/health', (req: Request, res: Response) => {
+app.get('/health', async (req: Request, res: Response) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+  } catch {
+    res.status(503).json({
+      success: false,
+      error: 'Database unreachable',
+    });
+    return;
+  }
+
   res.json({
     success: true,
     message: 'Server is running',
@@ -81,14 +89,14 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
 
   res.status(500).json({
     success: false,
-    error: process.env.NODE_ENV === 'production'
+    error: env.NODE_ENV === 'production'
       ? 'Internal server error'
       : err.message,
   });
 });
 
 // Start server
-if (process.env.NODE_ENV !== 'test') {
+if (env.NODE_ENV !== 'test') {
   app.listen(PORT, () => {
     console.log(`\n🚀 Server is running on http://localhost:${PORT}`);
     console.log(`📚 API Documentation: http://localhost:${PORT}`);

@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -18,6 +16,19 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: messaging-db-test
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: msguser
+      POSTGRES_PASSWORD: msgpass123
+      POSTGRES_DB: messaging_test
+    # throwaway: the test suite migrates it on every run
+    tmpfs:
+      - /var/lib/postgresql/data
 
 volumes:
   postgres_data:

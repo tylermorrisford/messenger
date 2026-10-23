@@ -1,36 +1,29 @@
-import { Router, Request, Response } from 'express';
+import { Router, Response } from 'express';
+import { z } from 'zod';
 import { registerUser, loginUser, getAllUsers, getUserById } from '../auth/user.js';
 import { authenticate, AuthRequest } from '../middleware/auth.middleware.js';
+import { emailSchema, validateBody } from '../lib/validate.js';
 
 const router = Router();
+
+const registerSchema = z.object({
+  email: emailSchema,
+  password: z.string().min(6, 'Password must be at least 6 characters'),
+  name: z.string().optional(),
+});
+
+const loginSchema = z.object({
+  email: emailSchema,
+  password: z.string().min(1, 'Password is required'),
+});
 
 /**
  * POST /api/auth/register
  * Register a new user
  */
-router.post('/register', async (req: Request, res: Response): Promise<void> => {
+router.post('/register', validateBody(registerSchema), async (req, res): Promise<void> => {
   try {
-    const { email, password, name } = req.body;
-
-    // Validate input
-    if (!email || !password) {
-      res.status(400).json({
-        success: false,
-        error: 'Email and password are required',
-      });
-      return;
-    }
-
-    if (password.length < 6) {
-      res.status(400).json({
-        success: false,
-        error: 'Password must be at least 6 characters',
-      });
-      return;
-    }
-
-    // Register user
-    const result = await registerUser({ email, password, name });
+    const result = await registerUser(req.body);
 
     res.status(201).json({
       success: true,
@@ -55,21 +48,9 @@ router.post('/register', async (req: Request, res: Response): Promise<void> => {
  * POST /api/auth/login
  * Login user
  */
-router.post('/login', async (req: Request, res: Response): Promise<void> => {
+router.post('/login', validateBody(loginSchema), async (req, res): Promise<void> => {
   try {
-    const { email, password } = req.body;
-
-    // Validate input
-    if (!email || !password) {
-      res.status(400).json({
-        success: false,
-        error: 'Email and password are required',
-      });
-      return;
-    }
-
-    // Login user
-    const result = await loginUser({ email, password });
+    const result = await loginUser(req.body);
 
     res.json({
       success: true,

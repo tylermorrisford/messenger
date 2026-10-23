@@ -15,14 +15,17 @@ A bare-bones messaging system with user authentication using PostgreSQL, Prisma 
 ## Project Structure
 
 ```
-prisma/
-├── docker-compose.yml      # PostgreSQL container configuration
+messenger/
+├── docker-compose.yml      # Dev and test PostgreSQL containers
+├── Dockerfile              # Multi-stage production image
 ├── prisma/
 │   ├── schema.prisma       # Database schema (User & Message models)
 │   └── migrations/         # Database migration files
 ├── src/
 │   ├── lib/
-│   │   └── prisma.ts       # Prisma client instance
+│   │   ├── env.ts          # Validated environment (fails fast)
+│   │   ├── prisma.ts       # Prisma client instance
+│   │   └── validate.ts     # zod request validation middleware
 │   ├── auth/
 │   │   ├── auth.ts         # JWT & password hashing utilities
 │   │   └── user.ts         # User registration & login
@@ -33,9 +36,10 @@ prisma/
 │   │   └── message.routes.ts # Message API endpoints
 │   ├── middleware/
 │   │   └── auth.middleware.ts # JWT authentication middleware
-│   ├── server.ts           # Express API server
-│   └── index.ts            # Demo application
-├── .env                    # Environment variables
+│   ├── test/               # vitest global setup
+│   └── server.ts           # Express API server
+├── .github/workflows/ci.yml # Typecheck + tests on every push and PR
+├── .env.example            # Environment variables the server requires
 ├── test-api.sh             # API testing script
 ├── API.md                  # Complete API documentation
 └── package.json
@@ -43,7 +47,7 @@ prisma/
 
 ## Prerequisites
 
-- Node.js 18+ (for running the app)
+- Node.js 22+ (for running the app)
 - Docker (for PostgreSQL database)
 - pnpm (package manager)
 
@@ -55,17 +59,20 @@ prisma/
 pnpm docker:up
 ```
 
-This starts a PostgreSQL 16 container with:
-- Database: `messaging`
-- User: `msguser`
-- Password: `msgpass123`
-- Port: `5432`
+This starts two PostgreSQL 16 containers:
+- `messaging` on port `5432` for development (data persists in a volume)
+- `messaging_test` on port `5433` for the test suite (in-memory, wiped on restart)
+
+Both use user `msguser` and password `msgpass123`.
 
 ### 2. Install Dependencies
 
 ```bash
 pnpm install
+cp .env.example .env
 ```
+
+The server refuses to start unless every variable in `.env.example` is set (and `JWT_SECRET` is at least 32 characters).
 
 ### 3. Run Migrations
 
@@ -78,39 +85,37 @@ pnpm db:migrate
 ### 4. Start the API Server
 
 ```bash
-pnpm start
+pnpm dev
 ```
 
 The API will be available at `http://localhost:3000`
 
-Or run in development mode with auto-reload:
+For a production-style run, compile first:
 
 ```bash
-pnpm dev
+pnpm build
+pnpm start
 ```
 
-### 5. Test the API
-
-Run the test script:
+### 5. Run the Tests
 
 ```bash
-bash test-api.sh
+pnpm test
 ```
 
-Or run the demo application:
-
-```bash
-pnpm demo
-```
+Tests run against the `messaging_test` database and migrate it on every run. For a manual smoke test against a running server, use `bash test-api.sh`.
 
 ## Available Commands
 
 ### Application
 
 ```bash
-pnpm start            # Start the API server
 pnpm dev              # Start API server with auto-reload
-pnpm demo             # Run the demo application (tests all features)
+pnpm build            # Compile TypeScript to dist/
+pnpm start            # Run the compiled server
+pnpm typecheck        # tsc --noEmit
+pnpm test             # Run the test suite once
+pnpm test:watch       # Run tests in watch mode
 ```
 
 ### Database Management
@@ -301,17 +306,27 @@ model Message {
 
 ## Environment Variables
 
-Create a `.env` file (already created):
+Copy `.env.example` to `.env` and fill it in:
 
 ```env
 DATABASE_URL="postgresql://msguser:msgpass123@localhost:5432/messaging?schema=public"
 JWT_SECRET="your-super-secret-jwt-key-change-in-production-min-32-chars"
 JWT_EXPIRES_IN="7d"
+PORT=3000
 ```
 
-⚠️ **Important**: Change `JWT_SECRET` in production!
+`src/lib/env.ts` validates these at startup and throws if anything is missing or malformed, so there is no fallback secret to forget about.
 
 ## Deployment
+
+### Build the image
+
+```bash
+docker build -t messenger-api .
+docker run --rm -p 3000:3000 --env-file .env messenger-api
+```
+
+The image contains the compiled server, production dependencies, and the Prisma CLI, so the same image can run `prisma migrate deploy`.
 
 ### Deploy with Docker
 
