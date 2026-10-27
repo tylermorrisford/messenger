@@ -153,7 +153,7 @@ export default function RecoverPage() {
               <FormField.Root isRequired>
                 <FormField.Label>Email</FormField.Label>
                 <FormField.Input>
-                  <TextInput type="email" autoComplete="email" value={email} onChange={setEmail} />
+                  <TextInput width="100%" type="email" autoComplete="email" value={email} onChange={setEmail} />
                 </FormField.Input>
               </FormField.Root>
               {errorAlert}
@@ -171,7 +171,7 @@ export default function RecoverPage() {
               <FormField.Root isRequired>
                 <FormField.Label>Code</FormField.Label>
                 <FormField.Input>
-                  <TextInput autoComplete="one-time-code" value={code} onChange={setCode} />
+                  <TextInput width="100%" autoComplete="one-time-code" value={code} onChange={setCode} />
                 </FormField.Input>
               </FormField.Root>
               {errorAlert}
@@ -196,7 +196,7 @@ export default function RecoverPage() {
                 <FormField.Root isRequired>
                   <FormField.Label>Recovery key</FormField.Label>
                   <FormField.Input>
-                    <TextInput autoComplete="off" value={recoveryKeyText} onChange={setRecoveryKeyText} />
+                    <TextInput width="100%" autoComplete="off" value={recoveryKeyText} onChange={setRecoveryKeyText} />
                   </FormField.Input>
                   <FormField.Description>The 13 groups of letters you saved when you signed up</FormField.Description>
                 </FormField.Root>
@@ -204,13 +204,13 @@ export default function RecoverPage() {
               <FormField.Root isRequired>
                 <FormField.Label>New password</FormField.Label>
                 <FormField.Input>
-                  <PasswordInput autoComplete="new-password" value={password} onChange={setPassword} />
+                  <PasswordInput width="100%" autoComplete="new-password" value={password} onChange={setPassword} />
                 </FormField.Input>
               </FormField.Root>
               <FormField.Root isRequired isInvalid={confirm !== '' && confirm !== password}>
                 <FormField.Label>Confirm new password</FormField.Label>
                 <FormField.Input>
-                  <PasswordInput autoComplete="new-password" value={confirm} onChange={setConfirm} />
+                  <PasswordInput width="100%" autoComplete="new-password" value={confirm} onChange={setConfirm} />
                 </FormField.Input>
                 <FormField.Error>The passwords do not match</FormField.Error>
               </FormField.Root>

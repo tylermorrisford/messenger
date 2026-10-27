@@ -52,13 +52,13 @@ export default function LoginPage() {
             <FormField.Root isRequired>
               <FormField.Label>Email</FormField.Label>
               <FormField.Input>
-                <TextInput type="email" autoComplete="email" value={email} onChange={setEmail} />
+                <TextInput width="100%" type="email" autoComplete="email" value={email} onChange={setEmail} />
               </FormField.Input>
             </FormField.Root>
             <FormField.Root isRequired>
               <FormField.Label>Password</FormField.Label>
               <FormField.Input>
-                <PasswordInput autoComplete="current-password" value={password} onChange={setPassword} />
+                <PasswordInput width="100%" autoComplete="current-password" value={password} onChange={setPassword} />
               </FormField.Input>
             </FormField.Root>
             {error && (

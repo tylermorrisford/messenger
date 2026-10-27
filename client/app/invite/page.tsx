@@ -109,21 +109,21 @@ function SignUp() {
               <FormField.Root>
                 <FormField.Label>Name</FormField.Label>
                 <FormField.Input>
-                  <TextInput autoComplete="name" value={name} onChange={setName} />
+                  <TextInput width="100%" autoComplete="name" value={name} onChange={setName} />
                 </FormField.Input>
                 <FormField.Description>Shown to your friends</FormField.Description>
               </FormField.Root>
               <FormField.Root isRequired>
                 <FormField.Label>Password</FormField.Label>
                 <FormField.Input>
-                  <PasswordInput autoComplete="new-password" value={password} onChange={setPassword} />
+                  <PasswordInput width="100%" autoComplete="new-password" value={password} onChange={setPassword} />
                 </FormField.Input>
                 <FormField.Description>Your keys are derived from it, so nobody can reset it for you</FormField.Description>
               </FormField.Root>
               <FormField.Root isRequired isInvalid={confirm !== '' && confirm !== password}>
                 <FormField.Label>Confirm password</FormField.Label>
                 <FormField.Input>
-                  <PasswordInput autoComplete="new-password" value={confirm} onChange={setConfirm} />
+                  <PasswordInput width="100%" autoComplete="new-password" value={confirm} onChange={setConfirm} />
                 </FormField.Input>
                 <FormField.Error>The passwords do not match</FormField.Error>
               </FormField.Root>

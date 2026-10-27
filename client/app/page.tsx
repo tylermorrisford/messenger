@@ -1,6 +1,6 @@
 'use client';
 
-import { Box, Button, DefaultPage, FormField, Heading, LoadingSpinner, Stack, TextInput, toast } from '@commercetools/nimbus';
+import { Box, Button, DefaultPage, FormField, Heading, Link, LoadingSpinner, Stack, TextInput, toast } from '@commercetools/nimbus';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState, type FormEvent } from 'react';
 import { useAuth } from '@/contexts/auth-context';
@@ -50,6 +50,7 @@ export default function HomePage() {
         <DefaultPage.Title>Messenger</DefaultPage.Title>
         <DefaultPage.Subtitle>Signed in as {user.email}</DefaultPage.Subtitle>
         <DefaultPage.Actions>
+          <Link href="/conversations">Conversations</Link>
           <Button variant="outline" onPress={() => void logout()}>
             Sign out
           </Button>
@@ -62,7 +63,7 @@ export default function HomePage() {
             <FormField.Root isRequired>
               <FormField.Label>Their email</FormField.Label>
               <FormField.Input>
-                <TextInput type="email" value={inviteEmail} onChange={setInviteEmail} />
+                <TextInput width="100%" type="email" value={inviteEmail} onChange={setInviteEmail} />
               </FormField.Input>
               <FormField.Description>They get a sign-up link that works for 7 days</FormField.Description>
             </FormField.Root>
