@@ -1,5 +1,6 @@
 import { prisma } from '../lib/prisma.js';
 import { HttpError } from '../lib/http-error.js';
+import { publish } from '../lib/notify.js';
 import { verifyEd25519 } from '../auth/auth.js';
 import { lockConversation, requireActiveMember } from './conversations.js';
 
@@ -61,7 +62,7 @@ export async function sendMessage(conversationId: string, userId: string, input:
     const now = new Date();
     const ttlSeconds = input.ttlSeconds ?? locked.defaultTtlSeconds;
 
-    return tx.message.create({
+    const created = await tx.message.create({
       data: {
         conversationId,
         senderId: userId,
@@ -76,9 +77,18 @@ export async function sendMessage(conversationId: string, userId: string, input:
       },
       select: messageSelect,
     });
+    await publish(tx, { type: 'message', conversationId, id: created.id });
+
+    return created;
   });
 
   return serialize(message);
+}
+
+export async function findMessage(id: string) {
+  const message = await prisma.message.findUnique({ where: { id }, select: messageSelect });
+
+  return message ? serialize(message) : null;
 }
 
 export async function listMessages(conversationId: string, userId: string, after: number, limit: number) {

@@ -9,6 +9,7 @@ import { HttpError } from './lib/http-error.js';
 import authRoutes from './routes/auth.routes.js';
 import inviteRoutes from './routes/invite.routes.js';
 import conversationRoutes from './routes/conversation.routes.js';
+import eventsRoutes from './routes/events.routes.js';
 import userRoutes from './routes/user.routes.js';
 
 // Create Express app
@@ -52,6 +53,7 @@ app.get('/health', async (req: Request, res: Response) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/invites', inviteRoutes);
 app.use('/api/conversations', conversationRoutes);
+app.use('/api/events', eventsRoutes);
 app.use('/api/users', userRoutes);
 
 // 404 handler

@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
 import { HttpError } from '../lib/http-error.js';
+import { publish } from '../lib/notify.js';
 import { verifyEd25519 } from '../auth/auth.js';
 
 type Tx = Prisma.TransactionClient;
@@ -190,6 +191,7 @@ export async function updateSettings(conversationId: string, userId: string, inp
     data: { defaultTtlSeconds: input.defaultTtlSeconds },
     select: conversationSelect,
   });
+  await publish(prisma, { type: 'conversation', conversationId, reason: 'settings' });
 
   return serialize(conversation);
 }
@@ -218,6 +220,7 @@ export async function addMember(conversationId: string, userId: string, key: Wra
 
     const rows = await verifiedKeyRows(tx, conversationId, currentEpoch, userId, [key], [member]);
     await tx.conversationKey.createMany({ data: rows });
+    await publish(tx, { type: 'conversation', conversationId, reason: 'member_added' });
 
     return serializeMember(member);
   });
@@ -289,6 +292,7 @@ export async function addKey(conversationId: string, userId: string, key: Wrappe
     const members = await tx.conversationMember.findMany({ where: { conversationId, leftAt: null }, select: { userId: true } });
     const rows = await verifiedKeyRows(tx, conversationId, currentEpoch, userId, [key], members);
     await tx.conversationKey.createMany({ data: rows });
+    await publish(tx, { type: 'conversation', conversationId, reason: 'key_added' });
   });
 }
 
@@ -299,6 +303,7 @@ export async function leaveConversation(tx: Tx, conversationId: string, userId: 
     data: { leftAt: now },
     select: { role: true },
   });
+  await publish(tx, { type: 'conversation', conversationId, reason: 'member_left', leftUserId: userId });
 
   const remaining = await tx.conversationMember.findMany({
     where: { conversationId, leftAt: null },
@@ -374,6 +379,7 @@ export async function rotate(conversationId: string, userId: string, input: Rota
 
     await tx.conversationKey.createMany({ data: rows });
     await tx.conversation.update({ where: { id: conversationId }, data: { currentEpoch: epoch, needsRotation: false } });
+    await publish(tx, { type: 'conversation', conversationId, reason: 'rotated', leftUserId: input.removeUserId });
 
     return { epoch };
   });

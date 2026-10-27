@@ -1,6 +1,7 @@
 import { prisma } from '../lib/prisma.js';
 import { env } from '../lib/env.js';
 import { HttpError } from '../lib/http-error.js';
+import { publish } from '../lib/notify.js';
 import { findOpenInvite } from '../api/invites.js';
 import { hashPassword, verifyEmailProof, verifyPassword } from './auth.js';
 
@@ -90,6 +91,7 @@ export async function registerUser(input: RegisterInput): Promise<PublicUser> {
       }
       if (invite.conversationId) {
         await tx.conversationMember.create({ data: { conversationId: invite.conversationId, userId: user.id } });
+        await publish(tx, { type: 'conversation', conversationId: invite.conversationId, reason: 'member_needs_key' });
       }
     }
 

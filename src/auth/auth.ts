@@ -7,6 +7,8 @@ import { env } from '../lib/env.js';
 export interface AccessClaims {
   userId: string;
   sessionId: string;
+  /** milliseconds since the epoch */
+  expiresAt: number;
 }
 
 export async function hashPassword(password: string): Promise<string> {
@@ -39,7 +41,7 @@ export function verifyEd25519(publicKey: string, message: string, signature: str
   }
 }
 
-export function signAccessToken(claims: AccessClaims): string {
+export function signAccessToken(claims: Omit<AccessClaims, 'expiresAt'>): string {
   return jwt.sign({ sid: claims.sessionId }, env.JWT_SECRET, {
     subject: claims.userId,
     audience: 'access',
@@ -51,11 +53,11 @@ export function verifyAccessToken(token: string): AccessClaims | null {
   try {
     const payload = jwt.verify(token, env.JWT_SECRET, { audience: 'access' });
 
-    if (typeof payload === 'string' || typeof payload.sub !== 'string' || typeof payload.sid !== 'string') {
+    if (typeof payload === 'string' || typeof payload.sub !== 'string' || typeof payload.sid !== 'string' || typeof payload.exp !== 'number') {
       return null;
     }
 
-    return { userId: payload.sub, sessionId: payload.sid };
+    return { userId: payload.sub, sessionId: payload.sid, expiresAt: payload.exp * 1000 };
   } catch {
     return null;
   }

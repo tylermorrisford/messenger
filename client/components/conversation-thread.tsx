@@ -44,6 +44,7 @@ import {
   type StoredPin,
 } from '@/lib/crypto/store';
 import { displayName, nameParts } from '@/lib/people';
+import { subscribeToEvents } from '@/lib/sse';
 
 interface ConversationThreadProps {
   id: string;
@@ -71,7 +72,6 @@ interface KeyChange {
 
 type Confirmation = { kind: 'leave' } | { kind: 'remove'; member: Member };
 
-const POLL_INTERVAL_MS = 3000;
 const COUNTDOWN_TICK_MS = 30_000;
 
 const TTL_OPTIONS: { seconds: number | null; label: string }[] = [
@@ -102,6 +102,16 @@ function timeLeft(expiresAt: string, now: number): string {
   return seconds >= 60 ? `${Math.floor(seconds / 60)}m` : '<1m';
 }
 
+/** The stream and a reload can both deliver the same message; the newer copy wins */
+function merge(previous: DecryptedMessage[], incoming: DecryptedMessage[]): DecryptedMessage[] {
+  const byId = new Map(previous.map((message) => [message.id, message]));
+  for (const message of incoming) {
+    byId.set(message.id, message);
+  }
+
+  return [...byId.values()].sort((a, b) => a.seq - b.seq);
+}
+
 function currentKeyOf(keys: UserKey[]): PublicKeys {
   const current = keys.find((key) => key.retiredAt === null);
 
@@ -120,6 +130,8 @@ export function ConversationThread({ id, user, identity }: ConversationThreadPro
   const router = useRouter();
   const listRef = useRef<ChatMessageListHandle>(null);
   const userKeys = useRef(new Map<string, Promise<UserKey[]>>());
+  /** mirrors epochKeys for the stream handler, which outlives any one render */
+  const epochKeysRef = useRef(new Map<number, Uint8Array>());
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [epochKeys, setEpochKeys] = useState(new Map<number, Uint8Array>());
   const [messages, setMessages] = useState<DecryptedMessage[]>([]);
@@ -224,71 +236,45 @@ export function ConversationThread({ id, user, identity }: ConversationThreadPro
 
     const opened = await Promise.all((await api.listMessages(id, { limit: 500 })).map((message) => open(message, keys)));
 
+    epochKeysRef.current = keys;
     setConversation(loaded);
     setKeyChanges(changes);
     setEpochKeys(keys);
-    setMessages(opened);
+    setMessages((previous) => merge(previous, opened));
   }, [id, user.id, identity, keysFor, open]);
 
+  // the stream drives loading: syncing after each (re)connect means nothing sent while disconnected is missed
   useEffect(() => {
-    load().catch((caught: unknown) => setLoadError(errorTitle(caught)));
-  }, [load]);
+    const sync = () =>
+      load().then(
+        () => setLoadError(null),
+        (caught: unknown) => {
+          setLoadError(errorTitle(caught));
+          // removed from the conversation or it is gone: show the error view instead of a stale thread
+          if (caught instanceof ApiError && (caught.status === 403 || caught.status === 404)) {
+            setConversation(null);
+          }
+        },
+      );
 
-  const epoch = conversation?.currentEpoch;
-  const needsRotation = conversation?.needsRotation;
-  const memberCount = conversation?.members.length;
-  const lastSeq = messages.reduce((max, message) => Math.max(max, message.seq), 0);
-
-  // Phase 4 replaces this with SSE; until then, pull changes every few seconds
-  useEffect(() => {
-    if (epoch === undefined) {
-      return;
-    }
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout>;
-
-    const tick = async () => {
-      try {
-        const [latest, fresh] = await Promise.all([api.getConversation(id), api.listMessages(id, { after: lastSeq, limit: 500 })]);
-        if (stopped) {
-          return;
+    return subscribeToEvents({
+      onOpen: sync,
+      onError: (caught) => setLoadError(errorTitle(caught)),
+      onEvent: (event) => {
+        if (event.type === 'resync' || (event.type === 'conversation' && event.conversationId === id)) {
+          void sync();
+        } else if (event.type === 'message' && event.message.conversationId === id) {
+          if (!epochKeysRef.current.has(event.message.epoch)) {
+            void sync();
+            return;
+          }
+          open(event.message, epochKeysRef.current)
+            .then((opened) => setMessages((previous) => merge(previous, [opened])))
+            .catch(() => void sync());
         }
-        const changed = latest.currentEpoch !== epoch || latest.needsRotation !== needsRotation || latest.members.length !== memberCount;
-        if (changed || !epochKeys.has(latest.currentEpoch) || fresh.some((message) => !epochKeys.has(message.epoch))) {
-          await load();
-          return;
-        }
-        if (fresh.length === 0) {
-          return;
-        }
-        const opened = await Promise.all(fresh.map((message) => open(message, epochKeys)));
-        if (!stopped) {
-          setMessages((previous) => {
-            const seen = new Set(previous.map((message) => message.id));
-            return [...previous, ...opened.filter((message) => !seen.has(message.id))].sort((a, b) => a.seq - b.seq);
-          });
-        }
-      } catch (caught) {
-        // removed from the conversation or it is gone: show the load error view instead of retrying forever
-        if (caught instanceof ApiError && (caught.status === 403 || caught.status === 404)) {
-          stopped = true;
-          setLoadError(caught.message);
-          setConversation(null);
-        }
-      } finally {
-        if (!stopped) {
-          timer = setTimeout(() => void tick(), POLL_INTERVAL_MS);
-        }
-      }
-    };
-
-    timer = setTimeout(() => void tick(), POLL_INTERVAL_MS);
-
-    return () => {
-      stopped = true;
-      clearTimeout(timer);
-    };
-  }, [id, epoch, needsRotation, memberCount, lastSeq, epochKeys, load, open]);
+      },
+    });
+  }, [id, load, open]);
 
   useEffect(() => {
     listRef.current?.scrollToBottom();
@@ -326,10 +312,9 @@ export function ConversationThread({ id, user, identity }: ConversationThreadPro
         senderKeyVersion: identity.keyVersion,
         ttlSeconds: ttlOverride ?? undefined,
       });
-      setMessages((previous) => [
-        ...previous,
-        { id: sent.id, seq: sent.seq, senderId: user.id, createdAt: sent.createdAt, expiresAt: sent.expiresAt, text },
-      ]);
+      setMessages((previous) =>
+        merge(previous, [{ id: sent.id, seq: sent.seq, senderId: user.id, createdAt: sent.createdAt, expiresAt: sent.expiresAt, text }]),
+      );
       setDraft('');
     } catch (caught) {
       toast({ type: 'error', title: errorTitle(caught) });
@@ -533,7 +518,7 @@ export function ConversationThread({ id, user, identity }: ConversationThreadPro
             {!currentKey && (
               <Alert.Root colorPalette="info">
                 <Alert.Title>Waiting for the conversation key</Alert.Title>
-                <Alert.Description>A member shares it with you the next time they open this conversation. This page checks every few seconds.</Alert.Description>
+                <Alert.Description>A member shares it with you the next time they open this conversation.</Alert.Description>
               </Alert.Root>
             )}
 

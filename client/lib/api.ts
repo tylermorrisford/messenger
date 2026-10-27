@@ -234,6 +234,32 @@ class ApiClient {
     });
   }
 
+  /** The raw response for a streaming endpoint; refreshes once on 401 like request() */
+  async openStream(path: string, signal: AbortSignal): Promise<Response> {
+    const tokenBefore = this.accessToken;
+    const open = () =>
+      fetch(`${API_URL}${path}`, {
+        headers: this.accessToken ? { Authorization: `Bearer ${this.accessToken}` } : {},
+        credentials: 'include',
+        signal,
+      });
+
+    let res = await open();
+    if (res.status === 401) {
+      if (!(await this.refresh(tokenBefore))) {
+        this.onSessionExpired?.();
+        throw new ApiError(401, 'Session expired');
+      }
+      res = await open();
+    }
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new ApiError(res.status, body?.error ?? 'Request failed');
+    }
+
+    return res;
+  }
+
   clearAccessToken(): void {
     this.accessToken = null;
   }

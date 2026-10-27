@@ -23,6 +23,7 @@ import { generateConversationKey, wrapConversationKey } from '@/lib/crypto/conve
 import { toBase64 } from '@/lib/crypto/keys';
 import { checkPin, saveConversationKey, type StoredIdentity } from '@/lib/crypto/store';
 import { displayName, nameParts } from '@/lib/people';
+import { subscribeToEvents } from '@/lib/sse';
 
 interface ConversationListProps {
   user: User;
@@ -36,12 +37,19 @@ export function ConversationList({ user, identity }: ConversationListProps) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api
-      .listConversations()
-      .then(setConversations)
-      .catch((caught: unknown) =>
-        toast({ type: 'error', title: caught instanceof ApiError ? caught.message : 'Could not reach the server. Try again.' }),
-      );
+    const fail = (caught: unknown) =>
+      toast({ type: 'error', title: caught instanceof ApiError ? caught.message : 'Could not reach the server. Try again.' });
+    const refresh = () => void api.listConversations().then(setConversations, fail);
+
+    return subscribeToEvents({
+      onOpen: refresh,
+      onError: fail,
+      onEvent: (event) => {
+        if (event.type !== 'message') {
+          refresh();
+        }
+      },
+    });
   }, []);
 
   const start = async (event: FormEvent) => {
