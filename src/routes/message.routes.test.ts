@@ -2,6 +2,7 @@ import request from 'supertest';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import app from '../server.js';
 import { prisma } from '../lib/prisma.js';
+import { sweepExpired } from '../api/messages.js';
 import { addMember, auth, messageBody, rotateKey, signUp, startConversation, type TestUser } from '../test/helpers.js';
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -135,5 +136,18 @@ describe('GET /api/conversations/:id/messages', () => {
 
   it('rejects a bad cursor', async () => {
     expect((await list(alice, { after: -1 })).status).toBe(400);
+  });
+});
+
+describe('sweepExpired', () => {
+  it('deletes only the expired rows', async () => {
+    const expired = (await send(alice, messageBody(alice.signingKey, id))).body.data;
+    const kept = (await send(bob, messageBody(bob.signingKey, id))).body.data;
+    await prisma.message.update({ where: { id: expired.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+
+    expect(await sweepExpired()).toBe(1);
+
+    const left = await prisma.message.findMany({ select: { id: true } });
+    expect(left.map((message) => message.id)).toEqual([kept.id]);
   });
 });

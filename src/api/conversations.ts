@@ -181,6 +181,19 @@ export async function getConversation(conversationId: string, userId: string) {
   return serialize(conversation);
 }
 
+/** Any member can change how long new messages live; null means they never expire */
+export async function updateSettings(conversationId: string, userId: string, input: { defaultTtlSeconds: number | null }) {
+  await requireActiveMember(conversationId, userId);
+
+  const conversation = await prisma.conversation.update({
+    where: { id: conversationId },
+    data: { defaultTtlSeconds: input.defaultTtlSeconds },
+    select: conversationSelect,
+  });
+
+  return serialize(conversation);
+}
+
 /** Adds someone who already has an account, with the current epoch key wrapped for them in the same transaction */
 export async function addMember(conversationId: string, userId: string, key: WrappedKey) {
   await requireActiveMember(conversationId, userId);

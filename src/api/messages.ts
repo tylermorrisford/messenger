@@ -97,3 +97,20 @@ export async function listMessages(conversationId: string, userId: string, after
 
   return messages.map(serialize);
 }
+
+const SWEEP_BATCH = 1000;
+
+/** Reads already hide expired rows; this only reclaims space, in batches so a backlog never holds one long lock */
+export async function sweepExpired(): Promise<number> {
+  let total = 0;
+  let deleted: number;
+
+  do {
+    deleted = await prisma.$executeRaw`
+      DELETE FROM "messages" WHERE "id" IN (SELECT "id" FROM "messages" WHERE "expiresAt" < now() LIMIT ${SWEEP_BATCH})
+    `;
+    total += deleted;
+  } while (deleted === SWEEP_BATCH);
+
+  return total;
+}

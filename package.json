@@ -9,6 +9,7 @@
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
     "invite": "tsx src/scripts/invite.ts",
+    "sweep": "tsx src/jobs/sweep.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

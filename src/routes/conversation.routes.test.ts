@@ -10,6 +10,7 @@ import {
   ed25519Keypair,
   emailProof,
   lastEmailText,
+  messageBody,
   registrationBody,
   rotateKey,
   signUp,
@@ -107,6 +108,47 @@ describe('GET /api/conversations', () => {
 
     expect((await getConversation(bob, id)).status).toBe(404);
     expect((await getKeys(bob, id)).status).toBe(404);
+  });
+});
+
+describe('PATCH /api/conversations/:id', () => {
+  function setTtl(user: TestUser, id: string, defaultTtlSeconds: number | null) {
+    return request(app).patch(`/api/conversations/${id}`).set(auth(user)).send({ defaultTtlSeconds });
+  }
+
+  function sendOne(user: TestUser, id: string) {
+    return request(app).post(`/api/conversations/${id}/messages`).set(auth(user)).send(messageBody(user.signingKey, id));
+  }
+
+  it('changes the default expiry for new messages', async () => {
+    const id = await startConversation(alice);
+
+    const res = await setTtl(alice, id, 3600);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.defaultTtlSeconds).toBe(3600);
+    const sent = (await sendOne(alice, id)).body.data;
+    expect(Date.parse(sent.expiresAt) - Date.parse(sent.createdAt)).toBe(3_600_000);
+  });
+
+  it('lets messages live forever', async () => {
+    const id = await startConversation(alice);
+
+    expect((await setTtl(alice, id, null)).body.data.defaultTtlSeconds).toBeNull();
+    expect((await sendOne(alice, id)).body.data.expiresAt).toBeNull();
+  });
+
+  it('only lets members change it', async () => {
+    const id = await startConversation(alice);
+
+    expect((await setTtl(bob, id, 3600)).status).toBe(404);
+  });
+
+  it('rejects a zero or oversized ttl', async () => {
+    const id = await startConversation(alice);
+
+    expect((await setTtl(alice, id, 0)).status).toBe(400);
+    expect((await setTtl(alice, id, 366 * 24 * 60 * 60)).status).toBe(400);
   });
 });
 

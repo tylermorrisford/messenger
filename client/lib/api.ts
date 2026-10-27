@@ -332,6 +332,10 @@ class ApiClient {
     return this.request(`/api/conversations/${encodeURIComponent(id)}`);
   }
 
+  updateConversation(id: string, input: { defaultTtlSeconds: number | null }): Promise<Conversation> {
+    return this.request(`/api/conversations/${encodeURIComponent(id)}`, { method: 'PATCH', body: input });
+  }
+
   addMember(conversationId: string, key: WrappedKey): Promise<Member> {
     return this.request(`/api/conversations/${encodeURIComponent(conversationId)}/members`, { method: 'POST', body: key });
   }

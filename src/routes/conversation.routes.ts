@@ -9,6 +9,7 @@ import {
   leave,
   listConversations,
   rotate,
+  updateSettings,
 } from '../api/conversations.js';
 import { listMessages, sendMessage } from '../api/messages.js';
 import { createInvite } from '../api/invites.js';
@@ -43,6 +44,12 @@ const inviteSchema = z.object({
   email: emailSchema,
 });
 
+const ttlSchema = z.int().positive().max(365 * 24 * 60 * 60);
+
+const settingsSchema = z.object({
+  defaultTtlSeconds: ttlSchema.nullable(),
+});
+
 const rotateSchema = z.object({
   expectedEpoch: z.int().positive(),
   removeUserId: z.uuid().optional(),
@@ -52,7 +59,7 @@ const rotateSchema = z.object({
 const messageSchema = z.object({
   epoch: z.int().positive(),
   senderKeyVersion: z.int().positive(),
-  ttlSeconds: z.int().positive().max(365 * 24 * 60 * 60).optional(),
+  ttlSeconds: ttlSchema.optional(),
   // 24-byte XChaCha20 nonce
   nonce: z.base64().length(32),
   ciphertext: base64Schema,
@@ -87,6 +94,14 @@ router.get('/', async (req, res): Promise<void> => {
  */
 router.get('/:id', async (req, res): Promise<void> => {
   res.json({ success: true, data: await getConversation(req.params.id, requireUser(req).userId) });
+});
+
+/**
+ * PATCH /api/conversations/:id
+ * Changes the default expiry for new messages; null means they never expire
+ */
+router.patch('/:id', validateBody(settingsSchema), async (req, res): Promise<void> => {
+  res.json({ success: true, data: await updateSettings(req.params.id, requireUser(req).userId, req.body) });
 });
 
 /**

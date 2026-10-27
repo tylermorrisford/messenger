@@ -18,6 +18,7 @@ import {
   ItemGroup,
   LoadingSpinner,
   MultilineTextInput,
+  Select,
   Stack,
   Text,
   TextInput,
@@ -55,6 +56,7 @@ interface DecryptedMessage {
   seq: number;
   senderId: string;
   createdAt: string;
+  expiresAt: string | null;
   text: string | null;
   /** set instead of text when the message could not be opened */
   problem?: string;
@@ -70,6 +72,35 @@ interface KeyChange {
 type Confirmation = { kind: 'leave' } | { kind: 'remove'; member: Member };
 
 const POLL_INTERVAL_MS = 3000;
+const COUNTDOWN_TICK_MS = 30_000;
+
+const TTL_OPTIONS: { seconds: number | null; label: string }[] = [
+  { seconds: 5 * 60, label: '5 minutes' },
+  { seconds: 60 * 60, label: '1 hour' },
+  { seconds: 24 * 60 * 60, label: '1 day' },
+  { seconds: 7 * 24 * 60 * 60, label: '1 week' },
+  { seconds: 30 * 24 * 60 * 60, label: '30 days' },
+  { seconds: null, label: 'Never' },
+];
+
+function ttlKey(seconds: number | null): string {
+  return seconds === null ? 'never' : String(seconds);
+}
+
+function ttlLabel(seconds: number | null): string {
+  return TTL_OPTIONS.find((option) => option.seconds === seconds)?.label ?? `${seconds} seconds`;
+}
+
+function timeLeft(expiresAt: string, now: number): string {
+  const seconds = Math.max(0, (Date.parse(expiresAt) - now) / 1000);
+  if (seconds >= 24 * 60 * 60) {
+    return `${Math.floor(seconds / (24 * 60 * 60))}d`;
+  }
+  if (seconds >= 60 * 60) {
+    return `${Math.floor(seconds / (60 * 60))}h`;
+  }
+  return seconds >= 60 ? `${Math.floor(seconds / 60)}m` : '<1m';
+}
 
 function currentKeyOf(keys: UserKey[]): PublicKeys {
   const current = keys.find((key) => key.retiredAt === null);
@@ -94,8 +125,11 @@ export function ConversationThread({ id, user, identity }: ConversationThreadPro
   const [messages, setMessages] = useState<DecryptedMessage[]>([]);
   const [keyChanges, setKeyChanges] = useState<KeyChange[]>([]);
   const [draft, setDraft] = useState('');
+  /** null sends with the conversation default */
+  const [ttlOverride, setTtlOverride] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const [email, setEmail] = useState('');
-  const [busy, setBusy] = useState<'send' | 'add' | 'rotate' | 'leave' | null>(null);
+  const [busy, setBusy] = useState<'send' | 'add' | 'rotate' | 'leave' | 'settings' | null>(null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [safetyPerson, setSafetyPerson] = useState<SafetyNumbersPerson | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -113,7 +147,14 @@ export function ConversationThread({ id, user, identity }: ConversationThreadPro
 
   const open = useCallback(
     async (message: Message, keys: Map<number, Uint8Array>): Promise<DecryptedMessage> => {
-      const base = { id: message.id, seq: message.seq, senderId: message.senderId, createdAt: message.createdAt, text: null };
+      const base = {
+        id: message.id,
+        seq: message.seq,
+        senderId: message.senderId,
+        createdAt: message.createdAt,
+        expiresAt: message.expiresAt,
+        text: null,
+      };
       const key = keys.get(message.epoch);
       if (!key) {
         return { ...base, problem: 'Sent before you had the key' };
@@ -253,6 +294,17 @@ export function ConversationThread({ id, user, identity }: ConversationThreadPro
     listRef.current?.scrollToBottom();
   }, [messages.length]);
 
+  // one timer: fires at the next expiry so hiding is on time, and at least every tick to keep the countdowns fresh
+  useEffect(() => {
+    const upcoming = messages.flatMap((message) => (message.expiresAt ? [Date.parse(message.expiresAt)] : [])).filter((at) => at > now);
+    if (upcoming.length === 0) {
+      return;
+    }
+    const timer = setTimeout(() => setNow(Date.now()), Math.min(Math.min(...upcoming) - now, COUNTDOWN_TICK_MS));
+
+    return () => clearTimeout(timer);
+  }, [messages, now]);
+
   const memberNames = new Map(conversation?.members.map((member) => [member.userId, displayName(member)]));
   const currentKey = conversation ? epochKeys.get(conversation.currentEpoch) : undefined;
   const isOwner = conversation?.members.some((member) => member.userId === user.id && member.role === 'OWNER') ?? false;
@@ -266,10 +318,18 @@ export function ConversationThread({ id, user, identity }: ConversationThreadPro
     setBusy('send');
 
     try {
-      const context = { conversationId: id, senderId: user.id, epoch: conversation.currentEpoch, ttlSeconds: null };
+      const context = { conversationId: id, senderId: user.id, epoch: conversation.currentEpoch, ttlSeconds: ttlOverride };
       const encrypted = await encryptMessage(text, context, currentKey, identity.ed25519Priv);
-      const sent = await api.sendMessage(id, { ...encrypted, epoch: conversation.currentEpoch, senderKeyVersion: identity.keyVersion });
-      setMessages((previous) => [...previous, { id: sent.id, seq: sent.seq, senderId: user.id, createdAt: sent.createdAt, text }]);
+      const sent = await api.sendMessage(id, {
+        ...encrypted,
+        epoch: conversation.currentEpoch,
+        senderKeyVersion: identity.keyVersion,
+        ttlSeconds: ttlOverride ?? undefined,
+      });
+      setMessages((previous) => [
+        ...previous,
+        { id: sent.id, seq: sent.seq, senderId: user.id, createdAt: sent.createdAt, expiresAt: sent.expiresAt, text },
+      ]);
       setDraft('');
     } catch (caught) {
       toast({ type: 'error', title: errorTitle(caught) });
@@ -357,6 +417,22 @@ export function ConversationThread({ id, user, identity }: ConversationThreadPro
     }
   };
 
+  const changeDefaultTtl = async (key: string | number | null) => {
+    const defaultTtlSeconds = key === 'never' ? null : Number(key);
+    if (!conversation || key === null || defaultTtlSeconds === conversation.defaultTtlSeconds) {
+      return;
+    }
+    setBusy('settings');
+
+    try {
+      setConversation(await api.updateConversation(id, { defaultTtlSeconds }));
+    } catch (caught) {
+      toast({ type: 'error', title: errorTitle(caught) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const leave = async () => {
     setBusy('leave');
 
@@ -411,6 +487,7 @@ export function ConversationThread({ id, user, identity }: ConversationThreadPro
 
   const others = conversation.members.filter((member) => member.userId !== user.id);
   const title = conversation.title ?? (others.length > 0 ? others.map(displayName).join(', ') : 'Just you');
+  const visible = messages.filter((message) => message.expiresAt === null || Date.parse(message.expiresAt) > now);
 
   return (
     <DefaultPage.Root height="100vh">
@@ -470,7 +547,7 @@ export function ConversationThread({ id, user, identity }: ConversationThreadPro
               borderRadius="300"
               emptyState={<Text color="fg.subtle">No messages yet. Say hi.</Text>}
             >
-              {messages.map((message) => {
+              {visible.map((message) => {
                 const mine = message.senderId === user.id;
                 const sender = conversation.members.find((member) => member.userId === message.senderId);
                 const senderName = mine ? 'you' : (memberNames.get(message.senderId) ?? 'a former member');
@@ -488,9 +565,16 @@ export function ConversationThread({ id, user, identity }: ConversationThreadPro
                         <Text whiteSpace="pre-wrap">{message.text ?? message.problem}</Text>
                       </ChatMessage.Body>
                       <ChatMessage.Meta>
-                        <Text textStyle="xs" color="fg.subtle">
-                          {new Date(message.createdAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}
-                        </Text>
+                        <Flex gap="200" alignItems="center">
+                          <Text textStyle="xs" color="fg.subtle">
+                            {new Date(message.createdAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}
+                          </Text>
+                          {message.expiresAt && (
+                            <Badge size="2xs" colorPalette="neutral">
+                              Disappears in {timeLeft(message.expiresAt, now)}
+                            </Badge>
+                          )}
+                        </Flex>
                       </ChatMessage.Meta>
                     </ChatMessage.Root>
                   </ChatMessageList.Item>
@@ -499,6 +583,21 @@ export function ConversationThread({ id, user, identity }: ConversationThreadPro
             </ChatMessageList.Root>
 
             <Flex gap="200" alignItems="flex-end">
+              <Select.Root
+                aria-label="This message disappears after"
+                selectedKey={ttlOverride === null ? 'default' : String(ttlOverride)}
+                onSelectionChange={(key) => setTtlOverride(key === null || key === 'default' ? null : Number(key))}
+                isDisabled={!canSend}
+              >
+                <Select.Options>
+                  <Select.Option id="default">Default ({ttlLabel(conversation.defaultTtlSeconds)})</Select.Option>
+                  {TTL_OPTIONS.filter((option) => option.seconds !== null).map((option) => (
+                    <Select.Option key={option.label} id={ttlKey(option.seconds)}>
+                      {option.label}
+                    </Select.Option>
+                  ))}
+                </Select.Options>
+              </Select.Root>
               <Box flex="1">
                 <MultilineTextInput
                   aria-label="Message"
@@ -589,6 +688,28 @@ export function ConversationThread({ id, user, identity }: ConversationThreadPro
                 })}
               </ItemGroup.Root>
             </Stack>
+
+            <FormField.Root size="sm">
+              <FormField.Label>Messages disappear after</FormField.Label>
+              <FormField.Input>
+                <Select.Root
+                  aria-label="Messages disappear after"
+                  width="100%"
+                  selectedKey={ttlKey(conversation.defaultTtlSeconds)}
+                  onSelectionChange={(key) => void changeDefaultTtl(key)}
+                  isDisabled={busy !== null}
+                >
+                  <Select.Options>
+                    {TTL_OPTIONS.map((option) => (
+                      <Select.Option key={option.label} id={ttlKey(option.seconds)}>
+                        {option.label}
+                      </Select.Option>
+                    ))}
+                  </Select.Options>
+                </Select.Root>
+              </FormField.Input>
+              <FormField.Description>Applies to new messages from everyone.</FormField.Description>
+            </FormField.Root>
 
             <form onSubmit={addMember}>
               <Stack direction="column" gap="300">
