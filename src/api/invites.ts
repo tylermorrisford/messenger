@@ -7,7 +7,7 @@ import { hashToken, randomToken } from '../auth/auth.js';
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Inserts the invite without emailing it; a null inviter is the bootstrap script */
-export async function issueInvite(email: string, inviterId: string | null) {
+export async function issueInvite(email: string, inviterId: string | null, conversationId: string | null = null) {
   if (await prisma.user.findUnique({ where: { email } })) {
     throw new HttpError(409, 'That email already has an account');
   }
@@ -19,6 +19,7 @@ export async function issueInvite(email: string, inviterId: string | null) {
       tokenHash: hashToken(token),
       email,
       inviterId,
+      conversationId,
       expiresAt: new Date(Date.now() + INVITE_TTL_MS),
     },
   });
@@ -26,13 +27,13 @@ export async function issueInvite(email: string, inviterId: string | null) {
   return { invite, link: `${env.APP_ORIGIN}/invite?token=${token}` };
 }
 
-export async function createInvite(inviterId: string, email: string): Promise<{ id: string; expiresAt: Date }> {
+export async function createInvite(inviterId: string, email: string, conversationId: string | null = null): Promise<{ id: string; expiresAt: Date }> {
   const inviter = await prisma.user.findUniqueOrThrow({
     where: { id: inviterId },
     select: { name: true, email: true },
   });
 
-  const { invite, link } = await issueInvite(email, inviterId);
+  const { invite, link } = await issueInvite(email, inviterId, conversationId);
 
   await sendEmail({
     to: email,

@@ -88,6 +88,9 @@ export async function registerUser(input: RegisterInput): Promise<PublicUser> {
       if (accepted.count === 0) {
         throw new HttpError(400, 'This invite is invalid or has expired');
       }
+      if (invite.conversationId) {
+        await tx.conversationMember.create({ data: { conversationId: invite.conversationId, userId: user.id } });
+      }
     }
 
     return user;
@@ -161,4 +164,29 @@ export async function getUserKeys(userId: string) {
     orderBy: { version: 'asc' },
     select: { version: true, x25519Pub: true, ed25519Pub: true, createdAt: true, retiredAt: true },
   });
+}
+
+export async function findUserByEmail(email: string) {
+  const user = await prisma.user.findUnique({
+    where: { email },
+    select: {
+      id: true,
+      email: true,
+      name: true,
+      keys: {
+        where: { retiredAt: null },
+        orderBy: { version: 'desc' },
+        take: 1,
+        select: { version: true, x25519Pub: true, ed25519Pub: true },
+      },
+    },
+  });
+
+  if (!user) {
+    return null;
+  }
+
+  const [keys] = user.keys;
+
+  return { ...user, keys };
 }

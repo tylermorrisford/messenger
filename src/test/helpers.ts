@@ -1,10 +1,12 @@
-import { generateKeyPairSync, randomBytes, sign, type KeyObject } from 'node:crypto';
+import { generateKeyPairSync, randomBytes, randomUUID, sign, type KeyObject } from 'node:crypto';
 import request, { type Response } from 'supertest';
 import { vi } from 'vitest';
 import type { EmailCodePurpose } from '@prisma/client';
 import app from '../server.js';
 import { sendEmail } from '../lib/email.js';
 import { credentialSigningInput } from '../api/credentials.js';
+import { conversationKeySigningInput } from '../api/conversations.js';
+import { messageSigningInput } from '../api/messages.js';
 
 export const b64 = (bytes: number): string => randomBytes(bytes).toString('base64');
 
@@ -89,4 +91,63 @@ export async function signUp(email: string, authKey = b64(32)) {
     accessToken: res.body.data.accessToken as string,
     cookie: refreshCookie(res),
   };
+}
+
+export function wrappedKeyFor(
+  signingKey: KeyObject,
+  key: { conversationId: string; epoch: number; recipientUserId: string; recipientKeyVersion?: number },
+) {
+  const { conversationId, epoch, ...row } = { recipientKeyVersion: 1, ...key, wrappedKey: b64(80) };
+
+  return { ...row, signature: signMessage(signingKey, conversationKeySigningInput({ ...row, conversationId, epoch })) };
+}
+
+export function messageBody(
+  signingKey: KeyObject,
+  conversationId: string,
+  overrides: { epoch?: number; senderKeyVersion?: number; ttlSeconds?: number } = {},
+) {
+  const body = { epoch: 1, senderKeyVersion: 1, nonce: b64(24), ciphertext: b64(48), ...overrides };
+
+  return { ...body, signature: signMessage(signingKey, messageSigningInput({ ...body, conversationId })) };
+}
+
+export function auth(user: { accessToken: string }) {
+  return { Authorization: `Bearer ${user.accessToken}` };
+}
+
+export type TestUser = Awaited<ReturnType<typeof signUp>>;
+
+export async function startConversation(owner: TestUser, title = 'Friends'): Promise<string> {
+  const id = randomUUID();
+  const res = await request(app)
+    .post('/api/conversations')
+    .set(auth(owner))
+    .send({ id, title, key: wrappedKeyFor(owner.signingKey, { conversationId: id, epoch: 1, recipientUserId: owner.userId }) });
+
+  if (res.status !== 201) {
+    throw new Error(`Creating a conversation failed: ${JSON.stringify(res.body)}`);
+  }
+
+  return id;
+}
+
+export function addMember(from: TestUser, conversationId: string, member: TestUser, epoch = 1) {
+  return request(app)
+    .post(`/api/conversations/${conversationId}/members`)
+    .set(auth(from))
+    .send(wrappedKeyFor(from.signingKey, { conversationId, epoch, recipientUserId: member.userId }));
+}
+
+export function rotateKey(from: TestUser, conversationId: string, expectedEpoch: number, members: TestUser[], removeUserId?: string) {
+  return request(app)
+    .post(`/api/conversations/${conversationId}/rotate`)
+    .set(auth(from))
+    .send({
+      expectedEpoch,
+      removeUserId,
+      wrappedKeys: members.map((member) =>
+        wrappedKeyFor(from.signingKey, { conversationId, epoch: expectedEpoch + 1, recipientUserId: member.userId }),
+      ),
+    });
 }

@@ -1,6 +1,7 @@
 import { prisma } from '../lib/prisma.js';
 import { HttpError } from '../lib/http-error.js';
 import { hashPassword, verifyEd25519, verifyEmailProof } from '../auth/auth.js';
+import { leaveConversation } from './conversations.js';
 import type { KdfParams, PublicUser } from '../auth/user.js';
 
 export interface CredentialUpdate {
@@ -142,6 +143,12 @@ export async function resetIdentity(emailProof: string, reset: IdentityReset): P
       },
     });
     await tx.session.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: now } });
+
+    // the old keys are gone for good, so every conversation has to re-key without this user
+    const memberships = await tx.conversationMember.findMany({ where: { userId: id, leftAt: null }, select: { conversationId: true } });
+    for (const { conversationId } of memberships) {
+      await leaveConversation(tx, conversationId, id, now);
+    }
   });
 
   return { id, email, name };

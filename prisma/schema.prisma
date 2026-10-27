@@ -28,6 +28,9 @@ model User {
   sessions        Session[]
   invitesSent     Invite[]  @relation("InviteInviter")
   invitesAccepted Invite[]  @relation("InviteAcceptedBy")
+  memberships     ConversationMember[]
+  conversationKeys ConversationKey[]
+  messages        Message[]
 
   @@map("users")
 }
@@ -97,9 +100,93 @@ model Invite {
   acceptedByUserId String?
   createdAt        DateTime  @default(now())
 
-  inviter    User? @relation("InviteInviter", fields: [inviterId], references: [id], onDelete: Cascade)
+  inviter      User?         @relation("InviteInviter", fields: [inviterId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   acceptedBy User? @relation("InviteAcceptedBy", fields: [acceptedByUserId], references: [id], onDelete: SetNull)
 
   @@index([email])
   @@map("invites")
+}
+
+enum MemberRole {
+  OWNER
+  MEMBER
+}
+
+model Conversation {
+  id                String   @id @default(uuid(7))
+  title             String?
+  currentEpoch      Int      @default(1)
+  // null means messages never expire
+  defaultTtlSeconds Int?     @default(604800)
+  needsRotation     Boolean  @default(false)
+  // provenance only, no relation: the conversation must outlive its creator's account
+  createdById       String
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  members  ConversationMember[]
+  keys     ConversationKey[]
+  messages Message[]
+  invites  Invite[]
+
+  @@map("conversations")
+}
+
+model ConversationMember {
+  conversationId String
+  userId         String
+  role           MemberRole @default(MEMBER)
+  joinedAt       DateTime   @default(now())
+  leftAt         DateTime?
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([conversationId, userId])
+  @@index([userId])
+  @@map("conversation_members")
+}
+
+model ConversationKey {
+  id                    String   @id @default(uuid(7))
+  conversationId        String
+  epoch                 Int
+  recipientUserId       String
+  recipientKeyVersion   Int
+  wrappedKey            String
+  // no relation: recipients must keep their wrapped key even if the distributor's account goes away
+  distributorUserId     String
+  distributorKeyVersion Int
+  signature             String
+  createdAt             DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  recipient    User         @relation(fields: [recipientUserId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, epoch, recipientUserId])
+  @@index([recipientUserId])
+  @@map("conversation_keys")
+}
+
+model Message {
+  id               String    @id @default(uuid(7))
+  seq              BigInt    @unique @default(autoincrement())
+  conversationId   String
+  senderId         String
+  senderKeyVersion Int
+  epoch            Int
+  ttlSeconds       Int?
+  nonce            String
+  ciphertext       String
+  signature        String
+  createdAt        DateTime  @default(now())
+  expiresAt        DateTime?
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User         @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, seq])
+  @@index([expiresAt])
+  @@map("messages")
 }
