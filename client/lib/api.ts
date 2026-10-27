@@ -1,5 +1,7 @@
 import type { KdfParams } from '@/lib/crypto/kdf';
 import type { CredentialUpdate } from '@/lib/crypto/keys';
+import type { WrappedKey } from '@/lib/crypto/conversation';
+import type { EncryptedMessage } from '@/lib/crypto/message';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3000';
 
@@ -57,6 +59,86 @@ export interface ResetIdentityInput extends CredentialUpdate {
   ed25519Pub: string;
   recoveryBundle: string;
   recoveryBundleNonce: string;
+}
+
+export interface PublicProfile {
+  id: string;
+  email: string;
+  name: string | null;
+  keys: { version: number; x25519Pub: string; ed25519Pub: string };
+}
+
+export type MemberRole = 'OWNER' | 'MEMBER';
+
+export interface Member {
+  userId: string;
+  role: MemberRole;
+  joinedAt: string;
+  name: string | null;
+  email: string;
+}
+
+export interface Conversation {
+  id: string;
+  title: string | null;
+  currentEpoch: number;
+  defaultTtlSeconds: number | null;
+  needsRotation: boolean;
+  createdById: string;
+  createdAt: string;
+  members: Member[];
+}
+
+export interface CreateConversationInput {
+  id: string;
+  title?: string;
+  key: Omit<WrappedKey, 'recipientUserId'>;
+}
+
+export interface RotateInput {
+  expectedEpoch: number;
+  removeUserId?: string;
+  wrappedKeys: WrappedKey[];
+}
+
+export interface MyConversationKey {
+  epoch: number;
+  recipientKeyVersion: number;
+  wrappedKey: string;
+  distributorUserId: string;
+  distributorKeyVersion: number;
+  signature: string;
+}
+
+export interface MemberMissingKey {
+  userId: string;
+  keyVersion: number;
+  x25519Pub: string;
+  ed25519Pub: string;
+}
+
+export interface ConversationKeys {
+  epoch: number;
+  mine: MyConversationKey[];
+  missing: MemberMissingKey[];
+}
+
+export interface Message extends EncryptedMessage {
+  id: string;
+  seq: number;
+  conversationId: string;
+  senderId: string;
+  senderKeyVersion: number;
+  epoch: number;
+  ttlSeconds: number | null;
+  createdAt: string;
+  expiresAt: string | null;
+}
+
+export interface SendMessageInput extends EncryptedMessage {
+  epoch: number;
+  senderKeyVersion: number;
+  ttlSeconds?: number;
 }
 
 export class ApiError extends Error {
@@ -232,6 +314,54 @@ class ApiClient {
 
   getInvite(token: string): Promise<{ email: string; expiresAt: string }> {
     return this.request(`/api/invites/${encodeURIComponent(token)}`, { auth: false });
+  }
+
+  findUser(email: string): Promise<PublicProfile> {
+    return this.request(`/api/users?email=${encodeURIComponent(email)}`);
+  }
+
+  createConversation(input: CreateConversationInput): Promise<Conversation> {
+    return this.request('/api/conversations', { method: 'POST', body: input });
+  }
+
+  listConversations(): Promise<Conversation[]> {
+    return this.request('/api/conversations');
+  }
+
+  getConversation(id: string): Promise<Conversation> {
+    return this.request(`/api/conversations/${encodeURIComponent(id)}`);
+  }
+
+  addMember(conversationId: string, key: WrappedKey): Promise<Member> {
+    return this.request(`/api/conversations/${encodeURIComponent(conversationId)}/members`, { method: 'POST', body: key });
+  }
+
+  inviteToConversation(conversationId: string, email: string): Promise<{ id: string; expiresAt: string }> {
+    return this.request(`/api/conversations/${encodeURIComponent(conversationId)}/invites`, { method: 'POST', body: { email } });
+  }
+
+  leaveConversation(conversationId: string): Promise<void> {
+    return this.request(`/api/conversations/${encodeURIComponent(conversationId)}/leave`, { method: 'POST' });
+  }
+
+  rotateConversationKey(conversationId: string, input: RotateInput): Promise<{ epoch: number }> {
+    return this.request(`/api/conversations/${encodeURIComponent(conversationId)}/rotate`, { method: 'POST', body: input });
+  }
+
+  getConversationKeys(conversationId: string): Promise<ConversationKeys> {
+    return this.request(`/api/conversations/${encodeURIComponent(conversationId)}/keys`);
+  }
+
+  addConversationKey(conversationId: string, key: WrappedKey): Promise<void> {
+    return this.request(`/api/conversations/${encodeURIComponent(conversationId)}/keys`, { method: 'POST', body: key });
+  }
+
+  listMessages(conversationId: string, { after = 0, limit = 100 }: { after?: number; limit?: number } = {}): Promise<Message[]> {
+    return this.request(`/api/conversations/${encodeURIComponent(conversationId)}/messages?after=${after}&limit=${limit}`);
+  }
+
+  sendMessage(conversationId: string, input: SendMessageInput): Promise<Message> {
+    return this.request(`/api/conversations/${encodeURIComponent(conversationId)}/messages`, { method: 'POST', body: input });
   }
 }
 

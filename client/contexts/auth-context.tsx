@@ -2,7 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { api, type User } from '@/lib/api';
-import { clearIdentity, loadIdentity, saveIdentity, type StoredIdentity } from '@/lib/crypto/store';
+import { clearKeys, loadIdentity, saveIdentity, type StoredIdentity } from '@/lib/crypto/store';
 
 interface AuthContextValue {
   user: User | null;
@@ -41,7 +41,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setUser(await api.me());
           setIdentity(stored);
         } else if (stored) {
-          await clearIdentity();
+          await clearKeys();
         }
       } catch {
         // the API is unreachable; the next sign-in attempt will surface that
@@ -64,7 +64,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(async () => {
     // local state goes regardless of whether the server heard about it
-    await Promise.all([api.logout().catch(() => undefined), clearIdentity()]);
+    await Promise.all([api.logout().catch(() => undefined), clearKeys()]);
     channel.current?.postMessage('logout');
     clear();
   }, [clear]);
