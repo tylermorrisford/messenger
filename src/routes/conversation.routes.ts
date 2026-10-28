@@ -14,6 +14,7 @@ import {
 import { listMessages, sendMessage } from '../api/messages.js';
 import { createInvite } from '../api/invites.js';
 import { authenticate, requireUser } from '../middleware/auth.middleware.js';
+import { inviteLimiter } from '../middleware/rate-limit.middleware.js';
 import { HttpError } from '../lib/http-error.js';
 import { base64Schema, emailSchema, signatureSchema, validateBody } from '../lib/validate.js';
 
@@ -118,7 +119,7 @@ router.post('/:id/members', validateBody(memberKeySchema), async (req, res): Pro
  * POST /api/conversations/:id/invites
  * Emails a sign-up link that joins this conversation on registration
  */
-router.post('/:id/invites', validateBody(inviteSchema), async (req, res): Promise<void> => {
+router.post('/:id/invites', inviteLimiter, validateBody(inviteSchema), async (req, res): Promise<void> => {
   const { userId } = requireUser(req);
   await getConversation(req.params.id, userId);
   const invite = await createInvite(userId, req.body.email, req.params.id);

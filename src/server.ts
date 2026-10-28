@@ -16,6 +16,9 @@ import userRoutes from './routes/user.routes.js';
 const app = express();
 const PORT = env.PORT;
 
+// behind the tunnel the socket peer is the cloudflared pod; Cloudflare appends the client IP to X-Forwarded-For
+app.set('trust proxy', env.NODE_ENV === 'production' ? 1 : false);
+
 // Security middleware
 app.use(helmet()); // Security headers
 app.use(cors({ origin: env.APP_ORIGIN, credentials: true }));

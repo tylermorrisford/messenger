@@ -6,6 +6,7 @@ import { createSession, REFRESH_TTL_MS, revokeSession, rotateSession } from '../
 import { issueEmailCode, verifyEmailCode } from '../api/email-codes.js';
 import { changePassword, getRecoveryBundle, recoverAccount, resetIdentity } from '../api/credentials.js';
 import { authenticate, requireUser } from '../middleware/auth.middleware.js';
+import { credentialsLimiter, emailCodeLimiter } from '../middleware/rate-limit.middleware.js';
 import { env } from '../lib/env.js';
 import { HttpError } from '../lib/http-error.js';
 import { base64Schema, emailSchema, kdfSchema, key32Schema, signatureSchema, validateBody } from '../lib/validate.js';
@@ -77,7 +78,7 @@ router.get('/params', async (req, res): Promise<void> => {
  * POST /api/auth/register
  * Needs an invite token, or a VERIFY email proof when REGISTRATION_MODE=open
  */
-router.post('/register', validateBody(registerSchema), async (req, res): Promise<void> => {
+router.post('/register', credentialsLimiter, validateBody(registerSchema), async (req, res): Promise<void> => {
   const user = await registerUser(req.body);
   const session = await createSession(user.id, req.headers['user-agent']);
 
@@ -88,7 +89,7 @@ router.post('/register', validateBody(registerSchema), async (req, res): Promise
 /**
  * POST /api/auth/login
  */
-router.post('/login', validateBody(loginSchema), async (req, res): Promise<void> => {
+router.post('/login', credentialsLimiter, validateBody(loginSchema), async (req, res): Promise<void> => {
   const result = await loginUser(req.body);
   const session = await createSession(result.user.id, req.headers['user-agent']);
 
@@ -135,7 +136,7 @@ router.delete('/refresh', async (req, res): Promise<void> => {
  * POST /api/auth/email-code
  * Emails a 6-digit code; always answers 200 so it cannot be used to probe for accounts
  */
-router.post('/email-code', validateBody(emailCodeSchema), async (req, res): Promise<void> => {
+router.post('/email-code', emailCodeLimiter, validateBody(emailCodeSchema), async (req, res): Promise<void> => {
   await issueEmailCode(req.body.email, req.body.purpose);
 
   res.json({ success: true });
@@ -145,7 +146,7 @@ router.post('/email-code', validateBody(emailCodeSchema), async (req, res): Prom
  * POST /api/auth/verify
  * Trades a code for a short-lived proof that the caller controls the email
  */
-router.post('/verify', validateBody(verifySchema), async (req, res): Promise<void> => {
+router.post('/verify', credentialsLimiter, validateBody(verifySchema), async (req, res): Promise<void> => {
   const proof = await verifyEmailCode(req.body.email, req.body.purpose, req.body.code);
 
   res.json({ success: true, data: { proof } });
@@ -200,7 +201,7 @@ router.put('/password', authenticate, validateBody(signedCredentialSchema), asyn
  * POST /api/auth/recover/bundle
  * The key bundle sealed under the recovery key, for a caller holding a RECOVER proof
  */
-router.post('/recover/bundle', validateBody(proofSchema), async (req, res): Promise<void> => {
+router.post('/recover/bundle', credentialsLimiter, validateBody(proofSchema), async (req, res): Promise<void> => {
   res.json({ success: true, data: await getRecoveryBundle(req.body.emailProof) });
 });
 
@@ -208,7 +209,7 @@ router.post('/recover/bundle', validateBody(proofSchema), async (req, res): Prom
  * POST /api/auth/recover
  * Forgot password: new credentials signed by the identity key unlocked with the recovery key; every session is logged out
  */
-router.post('/recover', validateBody(recoverSchema), async (req, res): Promise<void> => {
+router.post('/recover', credentialsLimiter, validateBody(recoverSchema), async (req, res): Promise<void> => {
   const { emailProof, ...update } = req.body;
   const user = await recoverAccount(emailProof, update);
   const session = await createSession(user.id, req.headers['user-agent']);
@@ -221,7 +222,7 @@ router.post('/recover', validateBody(recoverSchema), async (req, res): Promise<v
  * POST /api/auth/reset-identity
  * Lost recovery key: brand new identity keys, old ones retired, every session logged out
  */
-router.post('/reset-identity', validateBody(resetIdentitySchema), async (req, res): Promise<void> => {
+router.post('/reset-identity', credentialsLimiter, validateBody(resetIdentitySchema), async (req, res): Promise<void> => {
   const { emailProof, ...reset } = req.body;
   const user = await resetIdentity(emailProof, reset);
   const session = await createSession(user.id, req.headers['user-agent']);
