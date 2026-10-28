@@ -1,773 +1,174 @@
-# Deploying to Digital Ocean Droplet
+# Deployment
 
-This guide walks you through deploying the messaging application to a Digital Ocean droplet with Docker, PostgreSQL, and Nginx.
+Three pieces: the static client on Cloudflare Pages, the API on a one-node GKE cluster, and a Cloudflare Tunnel between them so nothing on the node listens to the internet. Postgres is a StatefulSet on the same node, with a nightly dump to a GCS bucket. The whole thing idles at about $20 a month and sleeps for about $1.
 
-## Table of Contents
-
-1. [Prerequisites](#prerequisites)
-2. [Create Digital Ocean Droplet](#create-digital-ocean-droplet)
-3. [Initial Server Setup](#initial-server-setup)
-4. [Install Docker](#install-docker)
-5. [Install Nginx](#install-nginx)
-6. [Transfer Files to Server](#transfer-files-to-server)
-7. [Configure Environment Variables](#configure-environment-variables)
-8. [Start the Application](#start-the-application)
-9. [Configure Nginx](#configure-nginx)
-10. [Set Up SSL (Optional but Recommended)](#set-up-ssl-optional-but-recommended)
-11. [Troubleshooting](#troubleshooting)
-
----
-
-## Prerequisites
-
-- A Digital Ocean account
-- A domain name (optional, but recommended for SSL)
-- Basic terminal/command line knowledge
-- SSH key pair (recommended for secure access)
-
----
-
-## Create Digital Ocean Droplet
-
-1. **Log in to Digital Ocean** and click "Create" → "Droplets"
-
-2. **Choose an Image**: Ubuntu 22.04 LTS x64 (recommended)
-
-3. **Choose Plan**:
-   - Basic plan: $12/month (2 GB RAM, 1 vCPU, 50 GB SSD) - Minimum recommended
-   - Or higher for production use
-
-4. **Choose Datacenter Region**: Select closest to your users
-
-5. **Authentication**:
-   - Recommended: Add your SSH key
-   - Alternative: Use password (less secure)
-
-6. **Finalize**:
-   - Choose a hostname (e.g., `messaging-app`)
-   - Click "Create Droplet"
-
-7. **Note your Droplet's IP address** - you'll need this throughout the guide
-
----
-
-## Initial Server Setup
-
-### 1. Connect to Your Droplet
-
-```bash
-# Using SSH key
-ssh root@YOUR_DROPLET_IP
-
-# Using password (if you didn't add SSH key)
-ssh root@YOUR_DROPLET_IP
-# Then enter the password sent to your email
+```
+app.example.com  (Cloudflare Pages, static Next export)  --fetch/SSE-->  api.example.com
+                                                                              |  Cloudflare Tunnel
+                                                                              v
+GKE Standard, zonal (control plane free for one cluster per billing account)
++-- default-pool: 1x e2-small on demand, 30 GB pd-balanced boot disk
+|   +-- postgres StatefulSet (10 Gi pd-balanced PVC)
+|   +-- api Deployment (HPA min 1, max 6)
+|   +-- cloudflared Deployment
+|   +-- sweep CronJob (every 5 min), pg-backup CronJob (nightly, to GCS)
++-- burst: e2-small Spot, autoscaled 0 to 3, tainted; only api pods go there
 ```
 
-### 2. Update System Packages
+## What it costs
 
-```bash
-apt update && apt upgrade -y
+| Mode | What's running | About |
+|---|---|---|
+| Idle | the core node, its public IP, two disks | $20/month |
+| Busy | plus each Spot node for as long as the HPA wants it | $4 to $7 per Spot node-month, billed per second |
+| Asleep (`deploy/scripts/sleep.sh`) | the Postgres disk and the bucket | $1/month |
+
+Idle breakdown: e2-small $12.23, external IPv4 $3.65, 30 GB boot disk about $3, 10 Gi data disk about $1. Artifact Registry, GCS, Secret Manager, and Cloud Logging stay inside their free tiers at this size. These are us-central1 list prices from October 2026. Every flag that costs money in `deploy/gcp/bootstrap.sh` has its price in a comment next to it. After the first full week, compare the billing report with this table and fix the numbers here.
+
+The $30 budget alert is the real safety net. The bootstrap script creates it before anything else.
+
+## Before you start
+
+- `gcloud`, plus `gcloud components install kubectl gke-gcloud-auth-plugin`
+- A GCP project with billing enabled, and your billing account id from `gcloud billing accounts list`
+- A Cloudflare account with your domain on it (the free plan is enough)
+- A Resend API key with your sending domain verified
+- Optional: a free healthchecks.io check, for the "did the backup run" alarm
+
+## 1. Create the tunnel
+
+Cloudflare dashboard > Zero Trust > Networks > Tunnels > Create a tunnel > Cloudflared. Name it `messenger`. The install step shows a command with a long `--token` value; copy the token and ignore the command, the cluster runs cloudflared for you. Under Public hostname add `api` on your domain, type HTTP, URL `api.messenger.svc.cluster.local:80`. That is the in-cluster Service; the tunnel pod resolves it.
+
+## 2. Create the secrets
+
+They live in Secret Manager and get copied into the cluster once by the bootstrap script. The passwords are hex on purpose, because the Postgres one ends up inside a connection URL.
+
+```sh
+gcloud config set project YOUR_PROJECT_ID
+gcloud services enable secretmanager.googleapis.com
+openssl rand -hex 32 | tr -d '\n' | gcloud secrets create messenger-postgres-password --data-file=-
+openssl rand -hex 32 | tr -d '\n' | gcloud secrets create messenger-jwt-secret --data-file=-
+printf '%s' 're_...' | gcloud secrets create messenger-resend-api-key --data-file=-
+printf '%s' 'eyJ...' | gcloud secrets create messenger-cloudflare-tunnel-token --data-file=-
+printf '%s' 'https://hc-ping.com/...' | gcloud secrets create messenger-healthchecks-url --data-file=-   # optional
 ```
 
-### 3. Create a Non-Root User (Recommended)
+## 3. Bootstrap GCP
 
-```bash
-# Create user
-adduser deploy
-
-# Add to sudo group
-usermod -aG sudo deploy
-
-# Copy SSH keys to new user (if using SSH)
-rsync --archive --chown=deploy:deploy ~/.ssh /home/deploy
+```sh
+PROJECT_ID=YOUR_PROJECT_ID BILLING_ACCOUNT=XXXXXX-XXXXXX-XXXXXX deploy/gcp/bootstrap.sh
 ```
 
-### 4. Set Up Firewall
+About ten minutes, most of it cluster creation. In order: enables APIs, checks the secrets exist, creates the budget, the Artifact Registry repo with a keep-5-images cleanup policy, the backup bucket, the cluster with its single on-demand node, the Spot `burst` pool, deletes the default SSH and RDP firewall rules, binds the `pg-backup` Kubernetes service account to the bucket, sets up Workload Identity Federation for GitHub Actions, and writes the secrets into the `messenger` namespace. Every step checks before it creates, so rerun it after a failure or to re-copy rotated secrets. `REGION`, `ZONE`, `CLUSTER`, `NAMESPACE`, `AR_REPO`, `BUCKET`, `GITHUB_REPO`, and `BUDGET_USD` can be overridden the same way as `PROJECT_ID`.
 
-```bash
-# Allow OpenSSH
-ufw allow OpenSSH
+No service account keys anywhere: GitHub Actions and the backup job both authenticate through Workload Identity Federation.
 
-# Allow HTTP
-ufw allow 80/tcp
+## 4. Tell GitHub about it
 
-# Allow HTTPS
-ufw allow 443/tcp
+Repo > Settings > Secrets and variables > Actions > Variables (not secrets; neither value is sensitive). The script prints both at the end.
 
-# Enable firewall
-ufw enable
+- `GCP_PROJECT_ID`
+- `GCP_WIF_PROVIDER`, like `projects/123456789/locations/global/workloadIdentityPools/github/providers/github`
 
-# Check status
-ufw status
+Add `GCP_REGION`, `GCP_ZONE`, or `GKE_CLUSTER` only if you changed those defaults. The Deploy workflow is skipped while `GCP_PROJECT_ID` is unset, which is why CI stayed green before the cluster existed.
+
+## 5. Configure and deploy
+
+Edit `deploy/k8s/overlays/prod/config.env`:
+
+- `APP_ORIGIN`: the Pages URL from step 6, scheme and host, no trailing slash. CORS is pinned to it.
+- `EMAIL_FROM`: a sender on your verified Resend domain
+- `REGISTRATION_MODE`: `invite` (default) or `open`
+- `BACKUP_BUCKET`: `messenger-backups-YOUR_PROJECT_ID`
+
+Commit and push. CI runs, then Deploy builds the image, pushes it to Artifact Registry tagged with the commit sha, applies the manifests, and waits for the rollout. The `migrate` init container runs `prisma migrate deploy` before the API starts. A push that touches `deploy/backup/` also rebuilds the backup image; run that workflow by hand once (Actions > Backup image > Run workflow) so the CronJob has an image to pull.
+
+```sh
+gcloud container clusters get-credentials messenger --zone us-central1-a
+kubectl -n messenger get pods
 ```
 
-### 5. Switch to Deploy User
+## 6. Publish the client
 
-```bash
-# Exit and reconnect as deploy user
+Cloudflare dashboard > Workers & Pages > Create > Pages > Connect to Git > this repo.
+
+- Root directory: `client`. pnpm finds the workspace root on its own.
+- Build command: `pnpm build`
+- Build output directory: `out`
+- Environment variables: `NEXT_PUBLIC_API_URL=https://api.yourdomain.com` and `NODE_VERSION=24`
+
+`NEXT_PUBLIC_API_URL` is baked in at build time; change it and redeploy, not the other way round. Add `app.yourdomain.com` under Custom domains, put that origin in `APP_ORIGIN`, and replace `api.example.com` in `client/public/_headers` with your API hostname. The CSP there allows inline scripts because Next's static export inlines its hydration script, and `wasm-unsafe-eval` for libsodium. Phase 6 tightens it with hashes.
+
+## 7. Check it works
+
+1. `kubectl -n messenger get pods`: `postgres-0`, `api-*`, and `cloudflared-*` Running. `kubectl -n messenger get hpa` shows a CPU percentage, not `<unknown>`.
+2. Invite yourself: `kubectl -n messenger exec deploy/api -- node dist/scripts/invite.js you@example.com`. Sign up from the link, open a second browser, chat both ways.
+3. With a conversation open, `kubectl -n messenger delete pod -l app=api`. The thread reconnects within 15 seconds and nothing is lost.
+4. Burst: `npx autocannon -c 50 -d 120 https://api.yourdomain.com/health`. The HPA adds pods, a Spot node shows up in `kubectl get nodes -w` within about two minutes, and it is gone about fifteen minutes after the load stops. To rehearse a preemption: `gcloud compute instances simulate-maintenance-event NODE_NAME --zone us-central1-a`; the pod reschedules and clients resync.
+5. Backup: `kubectl -n messenger create job --from=cronjob/pg-backup backup-now`, then `kubectl -n messenger logs job/backup-now`, `gcloud storage ls gs://messenger-backups-YOUR_PROJECT_ID`, and a ping on healthchecks.io. Then the restore drill below.
+6. Sleep and wake once, and look at the billing report the next day.
+
+## Day to day
+
+- Logs: `kubectl -n messenger logs deploy/api -f`. They also land in Cloud Logging (resource type `k8s_container`).
+- Invite a friend: `kubectl -n messenger exec deploy/api -- node dist/scripts/invite.js friend@example.com`
+- Deploy: push to main. Undo a bad one: `kubectl -n messenger rollout undo deployment/api`.
+- Config change: edit `config.env` and push. Kustomize hashes the ConfigMap name, so the pods restart with the new values.
+- Rotate a secret: `gcloud secrets versions add NAME --data-file=-`, rerun the bootstrap script, then `kubectl -n messenger rollout restart deployment/api` (or `cloudflared`). The Postgres image only reads its password on first init, so rotating that one also needs `ALTER USER msguser PASSWORD '...'` inside `kubectl -n messenger exec -it postgres-0 -- psql -U msguser messaging`.
+- More capacity all the time: `minReplicas: 2` in `deploy/k8s/base/hpa.yaml`. Two replicas still fit on the core node.
+- Node upgrades: the regular release channel upgrades the node on its own, and with one replica the API and Postgres are down for a minute or two while it happens. If that matters, set a maintenance window on the cluster.
+
+## Backups
+
+The `pg-backup` CronJob runs at 09:00 UTC. In order: `pg_dump` in custom format, `pg_restore --list` to prove the archive is readable, upload to `gs://messenger-backups-YOUR_PROJECT_ID/messenger-<utc timestamp>.dump`, then delete everything but the newest 7, then ping healthchecks.io. Upload comes before prune, so a failing night never deletes anything, and only successful uploads count toward the 7. If the ping stops, healthchecks.io emails you. The bucket keeps soft-deleted objects for 7 days, so a deleted dump can be brought back from the console.
+
+RPO is 24 hours. The data that matters most (key bundles, conversation keys, memberships) changes rarely, and messages expire anyway.
+
+### Restore drill
+
+Do this once after the first backup, and again whenever you change anything here. It runs in the `messenger` namespace because that is where the service account with bucket access lives.
+
+```sh
+IMAGE=us-central1-docker.pkg.dev/YOUR_PROJECT_ID/messenger/pg-backup:latest
+kubectl -n messenger run drill-db --image=postgres:16-alpine --env=POSTGRES_USER=msguser --env=POSTGRES_PASSWORD=drill --env=POSTGRES_DB=messaging
+kubectl -n messenger expose pod drill-db --port=5432
+kubectl -n messenger run drill --rm -it --restart=Never --image=$IMAGE \
+  --overrides='{"apiVersion":"v1","spec":{"serviceAccountName":"pg-backup"}}' --command -- bash
+```
+
+Inside that shell:
+
+```sh
+gcloud storage ls gs://messenger-backups-YOUR_PROJECT_ID/
+gcloud storage cp gs://messenger-backups-YOUR_PROJECT_ID/messenger-TIMESTAMP.dump /tmp/db.dump
+PGPASSWORD=drill pg_restore --host=drill-db --username=msguser --dbname=messaging --no-owner /tmp/db.dump
+PGPASSWORD=drill psql --host=drill-db --username=msguser --dbname=messaging -c 'select count(*) from users'
 exit
-ssh deploy@YOUR_DROPLET_IP
 ```
 
----
+The count should match production. Clean up with `kubectl -n messenger delete pod/drill-db svc/drill-db`.
 
-## Install Docker
+Restoring into production is the same `pg_restore` pointed at `--host=postgres` with the real password, plus `--clean --if-exists`, after `kubectl -n messenger scale deployment api --replicas=0`. Scale `api` back to 1 afterwards; the HPA idles while the count is 0.
 
-### 1. Install Docker Dependencies
+## Sleep and wake
 
-```bash
-sudo apt update
-sudo apt install -y apt-transport-https ca-certificates curl software-properties-common
-```
+`deploy/scripts/sleep.sh` suspends the CronJobs, scales the app and then Postgres to zero, and resizes both node pools to zero. `deploy/scripts/wake.sh` reverses it in three to five minutes. Both are also workflows (Actions > Sleep, Actions > Wake), so it works from a phone. While asleep the Pages site still loads but every request fails, because there is no tunnel pod to answer. The data disk, the bucket, and the images stay.
 
-### 2. Add Docker's Official GPG Key
+## When the database needs more
 
-```bash
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-```
+The single StatefulSet has no standby and no point-in-time recovery. When that stops being fine, the step up is the CloudNativePG operator: a primary with an optional streaming replica, continuous WAL archiving to the same bucket, and PITR. It wants about 300 MiB more memory than the core node has to spare, so it comes with a move to e2-medium (+$12/month). The migration is a `pg_dump` from the backup job, install the operator, create a `Cluster` resource, `pg_restore` into it, and point `DATABASE_URL` at the `-rw` service.
 
-### 3. Add Docker Repository
+## The cheaper alternative
 
-```bash
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-```
-
-### 4. Install Docker
-
-```bash
-sudo apt update
-sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-```
-
-### 5. Add User to Docker Group
-
-```bash
-sudo usermod -aG docker ${USER}
-
-# Log out and back in for this to take effect
-exit
-ssh deploy@YOUR_DROPLET_IP
-```
-
-### 6. Verify Docker Installation
-
-```bash
-docker --version
-docker compose version
-
-# Test Docker
-docker run hello-world
-```
-
----
-
-## Install Nginx
-
-### 1. Install Nginx
-
-```bash
-sudo apt update
-sudo apt install -y nginx
-```
-
-### 2. Verify Nginx is Running
-
-```bash
-sudo systemctl status nginx
-```
-
-You should be able to visit `http://YOUR_DROPLET_IP` in a browser and see the Nginx welcome page.
-
----
-
-## Transfer Files to Server
-
-You have several options for getting your files to the server:
-
-### Option A: Using Git (Recommended)
-
-**1. Install Git on Server**
-
-```bash
-sudo apt install -y git
-```
-
-**2. Clone Your Repository**
-
-```bash
-# If public repository
-cd ~
-git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
-cd YOUR_REPO
-
-# If private repository (you'll need to set up SSH keys or use HTTPS with token)
-git clone git@github.com:YOUR_USERNAME/YOUR_REPO.git
-```
-
-**3. Navigate to Project**
-
-```bash
-cd ~/YOUR_REPO/prisma
-```
-
-### Option B: Using SCP (Secure Copy)
-
-**From your local machine**, run:
-
-```bash
-# Navigate to your project directory locally
-cd /Users/tylerford/Desktop/repo
-
-# Copy entire prisma directory to server
-scp -r prisma deploy@YOUR_DROPLET_IP:~/
-
-# This will create ~/prisma on your server
-```
-
-### Option C: Using rsync (Better for Large Files)
-
-**From your local machine**, run:
-
-```bash
-# Navigate to your project directory locally
-cd /Users/tylerford/Desktop/repo
-
-# Sync prisma directory to server
-rsync -avz --progress prisma/ deploy@YOUR_DROPLET_IP:~/prisma/
-
-# Exclude node_modules and other unnecessary files
-rsync -avz --progress \
-  --exclude 'node_modules' \
-  --exclude '.next' \
-  --exclude 'dist' \
-  --exclude '.git' \
-  prisma/ deploy@YOUR_DROPLET_IP:~/prisma/
-```
-
----
-
-## Configure Environment Variables
-
-### 1. Navigate to Project Directory
-
-```bash
-cd ~/prisma  # or wherever your project is located
-```
-
-### 2. Update Backend .env
-
-```bash
-nano .env
-```
-
-Update with production values:
-
-```env
-# Database Configuration
-DATABASE_URL="postgresql://msguser:CHANGE_THIS_PASSWORD@localhost:5432/messaging?schema=public"
-
-# JWT Configuration
-JWT_SECRET="CHANGE_THIS_TO_A_SECURE_RANDOM_STRING_AT_LEAST_32_CHARACTERS_LONG"
-JWT_EXPIRES_IN="15m"
-
-# Server Configuration
-PORT="3000"
-NODE_ENV="production"
-APP_ORIGIN="https://app.example.com"
-
-# Sign-up
-REGISTRATION_MODE="invite"
-
-# Email (Resend; required in production)
-RESEND_API_KEY="re_CHANGE_THIS"
-EMAIL_FROM="Messenger <noreply@example.com>"
-```
-
-**Important**:
-- Change `CHANGE_THIS_PASSWORD` to a strong, unique password
-- Change `JWT_SECRET` to a long, random string (minimum 32 characters)
-
-**To generate a secure JWT secret**, run:
-
-```bash
-openssl rand -base64 48
-```
-
-Save and exit (Ctrl+X, then Y, then Enter).
-
-### 3. Update Frontend Environment Variables
-
-```bash
-cd client
-nano .env.local
-```
-
-Update with production API URL:
-
-```env
-NEXT_PUBLIC_API_URL=http://YOUR_DROPLET_IP:3000
-```
-
-Or if using a domain name:
-
-```env
-NEXT_PUBLIC_API_URL=https://api.yourdomain.com
-```
-
-Save and exit.
-
-### 4. Update docker-compose.yml
-
-```bash
-cd ~/prisma
-nano docker-compose.yml
-```
-
-Make sure the PostgreSQL password matches your `.env` file:
-
-```yaml
-environment:
-  POSTGRES_USER: msguser
-  POSTGRES_PASSWORD: CHANGE_THIS_PASSWORD  # Must match .env
-  POSTGRES_DB: messaging
-```
-
----
-
-## Start the Application
-
-### 1. Install Node.js and pnpm on Server
-
-```bash
-# Install Node.js 22.x
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-sudo apt install -y nodejs
-
-# Install pnpm
-sudo npm install -g pnpm
-
-# Verify installation
-node --version
-pnpm --version
-```
-
-### 2. Start PostgreSQL Database
-
-```bash
-cd ~/prisma
-docker compose up -d
-```
-
-Verify it's running:
-
-```bash
-docker compose ps
-docker compose logs postgres
-```
-
-### 3. Install Backend Dependencies
-
-```bash
-pnpm install
-```
-
-### 4. Run Database Migrations
-
-```bash
-pnpm db:generate
-pnpm db:migrate
-```
-
-### 5. Build and Start Backend API
-
-```bash
-# Start backend API (you may want to use PM2 for production - see below)
-pnpm start
-```
-
-### 6. Install and Build Frontend (in another terminal)
-
-Open a new SSH session:
-
-```bash
-ssh deploy@YOUR_DROPLET_IP
-cd ~/prisma/client
-pnpm install
-pnpm build
-```
-
-### 7. Use PM2 for Process Management (Recommended)
-
-Instead of running `pnpm start` directly, use PM2 to keep your applications running:
-
-```bash
-# Install PM2 globally
-sudo npm install -g pm2
-
-# Start backend API
-cd ~/prisma
-pm2 start pnpm --name "messaging-api" -- start
-
-# Start frontend
-cd ~/prisma/client
-pm2 start pnpm --name "messaging-client" -- start
-
-# Save PM2 configuration
-pm2 save
-
-# Set PM2 to start on system boot
-pm2 startup
-
-# View running processes
-pm2 list
-
-# View logs
-pm2 logs messaging-api
-pm2 logs messaging-client
-```
-
----
-
-## Configure Nginx
-
-### 1. Create Nginx Configuration
-
-```bash
-sudo nano /etc/nginx/sites-available/messaging-app
-```
-
-### 2. Add Configuration
-
-**If using domain name:**
-
-```nginx
-# API Server
-server {
-    listen 80;
-    server_name api.yourdomain.com;
-
-    location / {
-        proxy_pass http://localhost:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-
-# Frontend Client
-server {
-    listen 80;
-    server_name yourdomain.com www.yourdomain.com;
-
-    location / {
-        proxy_pass http://localhost:3001;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
-**If using IP address only:**
-
-```nginx
-server {
-    listen 80 default_server;
-    server_name _;
-
-    # Frontend on root
-    location / {
-        proxy_pass http://localhost:3001;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    # API on /api path (Note: You'll need to update frontend .env.local)
-    # Alternative: Access API directly on port 3000
-}
-```
-
-### 3. Enable the Site
-
-```bash
-# Create symbolic link
-sudo ln -s /etc/nginx/sites-available/messaging-app /etc/nginx/sites-enabled/
-
-# Remove default site
-sudo rm /etc/nginx/sites-enabled/default
-
-# Test configuration
-sudo nginx -t
-
-# Restart Nginx
-sudo systemctl restart nginx
-```
-
-### 4. Verify It's Working
-
-Visit `http://YOUR_DROPLET_IP` or `http://yourdomain.com` in your browser.
-
----
-
-## Set Up SSL (Optional but Recommended)
-
-### Prerequisites
-
-- A domain name pointing to your droplet's IP address
-- DNS records configured:
-  - A record: `yourdomain.com` → `YOUR_DROPLET_IP`
-  - A record: `www.yourdomain.com` → `YOUR_DROPLET_IP`
-  - A record: `api.yourdomain.com` → `YOUR_DROPLET_IP`
-
-### 1. Install Certbot
-
-```bash
-sudo apt install -y certbot python3-certbot-nginx
-```
-
-### 2. Obtain SSL Certificate
-
-```bash
-# For all domains at once
-sudo certbot --nginx -d yourdomain.com -d www.yourdomain.com -d api.yourdomain.com
-
-# Follow the prompts:
-# - Enter your email
-# - Agree to terms
-# - Choose whether to redirect HTTP to HTTPS (recommended: Yes)
-```
-
-### 3. Verify Auto-Renewal
-
-```bash
-# Test renewal process
-sudo certbot renew --dry-run
-```
-
-Certbot will automatically renew certificates before they expire.
-
-### 4. Update Frontend Environment Variable
-
-```bash
-cd ~/prisma/client
-nano .env.local
-```
-
-Change to HTTPS:
-
-```env
-NEXT_PUBLIC_API_URL=https://api.yourdomain.com
-```
-
-Then rebuild and restart:
-
-```bash
-pnpm build
-pm2 restart messaging-client
-```
-
----
+If the goal were only to run the app, Cloud Run plus a Neon Postgres would cost $0 to $5 a month and scale to zero. The Dockerfile works there as is. Two catches: `LISTEN/NOTIFY` needs Neon's direct connection string, not the pooled one, and an open SSE stream keeps a Cloud Run instance billed for as long as it lasts. The sweep becomes a Cloud Run job on a Cloud Scheduler trigger. This repo runs on GKE because learning Kubernetes was part of the point.
 
 ## Troubleshooting
 
-### Check Application Logs
-
-```bash
-# PM2 logs
-pm2 logs messaging-api
-pm2 logs messaging-client
-
-# Docker logs
-docker compose logs postgres
-
-# Nginx logs
-sudo tail -f /var/log/nginx/error.log
-sudo tail -f /var/log/nginx/access.log
-```
-
-### Application Won't Start
-
-```bash
-# Check if ports are in use
-sudo netstat -tlnp | grep :3000
-sudo netstat -tlnp | grep :3001
-
-# Check PM2 status
-pm2 list
-pm2 describe messaging-api
-pm2 describe messaging-client
-
-# Restart applications
-pm2 restart all
-```
-
-### Database Connection Issues
-
-```bash
-# Check if PostgreSQL container is running
-docker compose ps
-
-# Check PostgreSQL logs
-docker compose logs postgres
-
-# Test database connection
-docker compose exec postgres psql -U msguser -d messaging
-
-# If you need to reset the database
-cd ~/prisma
-docker compose down -v
-docker compose up -d
-pnpm db:migrate
-```
-
-### Nginx Issues
-
-```bash
-# Test Nginx configuration
-sudo nginx -t
-
-# Restart Nginx
-sudo systemctl restart nginx
-
-# Check Nginx status
-sudo systemctl status nginx
-
-# View error logs
-sudo tail -f /var/log/nginx/error.log
-```
-
-### Permission Issues
-
-```bash
-# If you get permission errors with Docker
-sudo usermod -aG docker $USER
-# Then log out and back in
-
-# If files have wrong ownership
-sudo chown -R deploy:deploy ~/prisma
-```
-
-### Can't Access Application from Browser
-
-1. **Check firewall**:
-   ```bash
-   sudo ufw status
-   # Make sure ports 80 and 443 are allowed
-   ```
-
-2. **Check if services are running**:
-   ```bash
-   pm2 list
-   docker compose ps
-   sudo systemctl status nginx
-   ```
-
-3. **Check if ports are accessible**:
-   ```bash
-   # From your local machine
-   curl http://YOUR_DROPLET_IP
-   curl http://YOUR_DROPLET_IP:3000/health
-   ```
-
-### Frontend Can't Connect to API
-
-1. **Check `.env.local`** in frontend - make sure API URL is correct
-2. **Check CORS settings** in backend `src/server.ts`
-3. **Check Nginx proxy configuration**
-4. **Rebuild frontend** after changing environment variables:
-   ```bash
-   cd ~/prisma/client
-   pnpm build
-   pm2 restart messaging-client
-   ```
-
----
-
-## Maintenance Commands
-
-### Update Application
-
-```bash
-# Pull latest changes (if using Git)
-cd ~/prisma
-git pull
-
-# Backend
-pnpm install
-pnpm db:migrate
-pm2 restart messaging-api
-
-# Frontend
-cd client
-pnpm install
-pnpm build
-pm2 restart messaging-client
-```
-
-### Backup Database
-
-```bash
-# Create backup
-docker compose exec postgres pg_dump -U msguser messaging > backup_$(date +%Y%m%d_%H%M%S).sql
-
-# Restore from backup
-docker compose exec -T postgres psql -U msguser messaging < backup_20260109_120000.sql
-```
-
-### Monitor Resources
-
-```bash
-# System resources
-htop
-
-# Docker resources
-docker stats
-
-# PM2 monitoring
-pm2 monit
-```
-
----
-
-## Security Checklist
-
-- [ ] Changed default PostgreSQL password in `docker-compose.yml` and `.env`
-- [ ] Set strong JWT secret (minimum 32 characters)
-- [ ] Configured firewall (UFW) to only allow necessary ports
-- [ ] Using non-root user for deployment
-- [ ] Set up SSL/HTTPS with Let's Encrypt
-- [ ] Regular system updates: `sudo apt update && sudo apt upgrade`
-- [ ] Database backups configured
-- [ ] Consider setting up automated backups to Digital Ocean Spaces or S3
-
----
-
-## Next Steps
-
-1. **Set up automated backups** - Use cron jobs or Digital Ocean's backup feature
-2. **Monitor application** - Set up monitoring with tools like Datadog, New Relic, or Prometheus
-3. **Configure logging** - Centralize logs with services like Papertrail or Loggly
-4. **Set up CI/CD** - Automate deployments with GitHub Actions or GitLab CI
-5. **Add rate limiting** - Protect your API from abuse
-6. **Configure CORS properly** - Restrict origins in production
-
----
-
-**Your messaging application should now be live and accessible!** 🎉
+- A pod is Pending with "Insufficient memory": the core node is full. Add a pool with `--machine-type=e2-medium`, drain `default-pool`, delete it, and rename the pool references in `deploy/scripts/*.sh`.
+- `api` is stuck in `Init`: `kubectl -n messenger logs deploy/api -c migrate`. Usually Postgres is not ready yet and the next retry works; a failed migration shows up here as SQL.
+- The browser shows CORS errors: `APP_ORIGIN` has to match the Pages origin exactly.
+- `cloudflared` is crash-looping: the token is wrong or was revoked. Put the new one in Secret Manager, rerun bootstrap, `kubectl -n messenger rollout restart deployment/cloudflared`.
+- The event stream drops every 100 seconds: Cloudflare closes idle responses at 100 seconds, which is why the server sends a comment every 25. Check `kubectl -n messenger logs deploy/api` for the stream opening at all.
+- `pg-backup` is in `ImagePullBackOff`: run the Backup image workflow.
+- Deploy fails in the auth step: `GCP_WIF_PROVIDER` is wrong, or the repo name in the bootstrap's `GITHUB_REPO` does not match this repo.
+- Sign-up emails never arrive: `RESEND_API_KEY` is wrong or `EMAIL_FROM` is not on a verified domain. `kubectl -n messenger logs deploy/api | grep -i resend`.

@@ -1,0 +1,34 @@
+name: Sleep
+
+on:
+  workflow_dispatch:
+
+concurrency: deploy
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  ZONE: ${{ vars.GCP_ZONE || 'us-central1-a' }}
+  CLUSTER: ${{ vars.GKE_CLUSTER || 'messenger' }}
+
+jobs:
+  sleep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.CLUSTER }}
+          location: ${{ env.ZONE }}
+
+      - run: deploy/scripts/sleep.sh
