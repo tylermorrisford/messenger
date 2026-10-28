@@ -118,6 +118,70 @@ Cloudflare dashboard > Workers & Pages > Create > Pages > Connect to Git > this 
 - More capacity all the time: `minReplicas: 2` in `deploy/k8s/base/hpa.yaml`. Two replicas still fit on the core node.
 - Node upgrades: the regular release channel upgrades the node on its own, and with one replica the API and Postgres are down for a minute or two while it happens. If that matters, set a maintenance window on the cluster.
 
+## Managing costs
+
+The node is the bill. Pods cost nothing on their own, so stopping one saves nothing and is only useful for maintenance; what moves the bill is how many nodes exist and for how long. Everything here is reversible.
+
+### Stop or restart one piece
+
+```sh
+kubectl -n messenger scale deployment api --replicas=0          # chat is down; the HPA idles while the count is 0
+kubectl -n messenger scale deployment api --replicas=1          # back; the HPA takes over again from here
+kubectl -n messenger scale deployment cloudflared --replicas=0  # off the internet, API and database still running
+kubectl -n messenger scale statefulset postgres --replicas=0    # database stopped, disk kept; api readiness fails until it's back
+kubectl -n messenger patch cronjob sweep -p '{"spec":{"suspend":true}}'   # same for pg-backup; "false" to resume
+kubectl -n messenger rollout restart deployment/api             # restart without downtime
+```
+
+### Sleep and wake
+
+`deploy/scripts/sleep.sh` suspends the CronJobs, scales the app and then Postgres to zero, and resizes both node pools to zero. `deploy/scripts/wake.sh` reverses it in three to five minutes. Both are also workflows (Actions > Sleep, Actions > Wake), so it works from a phone. While asleep the Pages site still loads but every request fails, because there is no tunnel pod to answer. The data disk, the bucket, and the images stay, and the bill drops from about $20 to about $1 a month.
+
+This is the only lever that saves real money. Use it for any stretch of days when nobody will chat; the four minutes to wake up are the whole cost.
+
+### The knobs
+
+| Knob | Where | What it does to the bill |
+|---|---|---|
+| `maxReplicas` on the HPA | `deploy/k8s/base/hpa.yaml` | Caps how many `api` pods can exist, and so how many Spot nodes the autoscaler will add. Spot nodes appear only when a pod can't fit on the core node. |
+| `--max-nodes` on the `burst` pool | `gcloud container clusters update messenger --zone us-central1-a --node-pool burst --enable-autoscaling --min-nodes 0 --max-nodes 1` | Hard cap on Spot nodes regardless of the HPA. 0 disables bursting. |
+| `minReplicas: 2` | `hpa.yaml` | Two `api` pods still fit on the core node, so this is free. |
+| Machine type of the core node | `bootstrap.sh`, or a new pool | e2-small to e2-medium is +$12/month, and the fix if pods sit Pending for memory. |
+| Boot disk size | `--disk-size` in `bootstrap.sh` | About $0.10 per GB per month. 30 GB is already the floor for pd-balanced. |
+| `defaultTtlSeconds` | conversation settings in the app | Shorter lifetimes keep the database and the backups small. Not a cost lever at this size. |
+
+### Reading the bill
+
+Console > Billing > Reports, filter to the project, group by SKU. On an idle month expect lines like these, and nothing else of size:
+
+- `E2 Instance Core running in Americas` and `E2 Instance Ram running in Americas`: the core node, about $12 together.
+- `Spot Preemptible E2 Instance Core/Ram`: only on days the burst pool had a node.
+- `Balanced PD Capacity`: the 30 GB boot disk plus the 10 GiB data disk, about $4.
+- `External IP Charge on a Standard VM`: $3.65.
+- `Standard Storage`, `Artifact Registry Storage`, `Cloud Logging`: should round to zero inside the free tiers.
+
+The budget alert emails billing admins at $15, $27, and $30. Two quick checks that catch a forgotten resource:
+
+```sh
+gcloud compute instances list   # exactly one VM when idle, none while asleep, more only while bursting
+gcloud compute disks list       # the boot disk and the pvc-... data disk, nothing else
+kubectl get nodes -L cloud.google.com/gke-nodepool   # a burst node that stays for hours means load, or a stuck pod
+```
+
+### Tear it all down
+
+Order matters: delete the namespace first so the data disk goes with its PersistentVolumeClaim, otherwise the disk outlives the cluster and keeps billing.
+
+```sh
+kubectl delete namespace messenger
+gcloud container clusters delete messenger --zone us-central1-a --quiet
+gcloud compute disks list                                            # should be empty
+gcloud storage rm -r gs://messenger-backups-YOUR_PROJECT_ID          # the backups are gone after this
+gcloud artifacts repositories delete messenger --location=us-central1 --quiet
+```
+
+Secrets, the Workload Identity pool, and the budget are free to leave; `gcloud secrets delete NAME`, `gcloud iam workload-identity-pools delete github --location=global`, and `gcloud billing budgets delete` remove them. If the project exists only for this, `gcloud projects delete YOUR_PROJECT_ID` does all of the above in one step with a 30-day undo window. Outside GCP: delete the tunnel in Cloudflare Zero Trust, the Pages project, and the `GCP_PROJECT_ID` variable on GitHub so the Deploy workflow stops running.
+
 ## Backups
 
 The `pg-backup` CronJob runs at 09:00 UTC. In order: `pg_dump` in custom format, `pg_restore --list` to prove the archive is readable, upload to `gs://messenger-backups-YOUR_PROJECT_ID/messenger-<utc timestamp>.dump`, then delete everything but the newest 7, then ping healthchecks.io. Upload comes before prune, so a failing night never deletes anything, and only successful uploads count toward the 7. If the ping stops, healthchecks.io emails you. The bucket keeps soft-deleted objects for 7 days, so a deleted dump can be brought back from the console.
@@ -149,10 +213,6 @@ exit
 The count should match production. Clean up with `kubectl -n messenger delete pod/drill-db svc/drill-db`.
 
 Restoring into production is the same `pg_restore` pointed at `--host=postgres` with the real password, plus `--clean --if-exists`, after `kubectl -n messenger scale deployment api --replicas=0`. Scale `api` back to 1 afterwards; the HPA idles while the count is 0.
-
-## Sleep and wake
-
-`deploy/scripts/sleep.sh` suspends the CronJobs, scales the app and then Postgres to zero, and resizes both node pools to zero. `deploy/scripts/wake.sh` reverses it in three to five minutes. Both are also workflows (Actions > Sleep, Actions > Wake), so it works from a phone. While asleep the Pages site still loads but every request fails, because there is no tunnel pod to answer. The data disk, the bucket, and the images stay.
 
 ## When the database needs more
 
