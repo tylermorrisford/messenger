@@ -1,0 +1,101 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  selector:
+    app: api
+  ports:
+    - port: 80
+      targetPort: 3000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  # no replicas here: the HPA owns the count and kubectl apply would reset it
+  selector:
+    matchLabels:
+      app: api
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      tolerations:
+        - key: cloud.google.com/gke-spot
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: cloud.google.com/gke-spot
+                    operator: In
+                    values: ["true"]
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: api
+                topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: migrate
+          image: api
+          # Prisma takes an advisory lock, so replicas racing here is safe
+          command: ["node", "node_modules/prisma/build/index.js", "migrate", "deploy"]
+          envFrom:
+            - secretRef:
+                name: messenger-db
+      containers:
+        - name: api
+          image: api
+          ports:
+            - containerPort: 3000
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3000"
+          envFrom:
+            - secretRef:
+                name: messenger-db
+            - secretRef:
+                name: messenger-api
+            - configMapRef:
+                name: messenger-config
+          # no liveness probe: /health fails when the DB is down and restarting the API would not fix that
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api
+spec:
+  # minAvailable 1 would block node upgrades while there is a single replica
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: api

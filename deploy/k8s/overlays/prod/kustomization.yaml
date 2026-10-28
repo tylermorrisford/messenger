@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: messenger
+resources:
+  - ../../base
+configMapGenerator:
+  - name: messenger-config
+    envs:
+      - config.env
+# the deploy workflow replaces the placeholders with sed; no kustomize binary needed on the runner
+images:
+  - name: api
+    newName: __REGISTRY__/api
+    newTag: __TAG__
+  - name: pg-backup
+    newName: __REGISTRY__/pg-backup
+    newTag: latest

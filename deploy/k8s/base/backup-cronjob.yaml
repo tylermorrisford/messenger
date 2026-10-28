@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pg-backup
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pg-backup
+spec:
+  schedule: "0 9 * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      template:
+        spec:
+          serviceAccountName: pg-backup
+          restartPolicy: Never
+          containers:
+            - name: backup
+              image: pg-backup
+              env:
+                - name: PGHOST
+                  value: postgres
+                - name: PGUSER
+                  value: msguser
+                - name: PGDATABASE
+                  value: messaging
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: messenger-db
+                      key: POSTGRES_PASSWORD
+                - name: BUCKET
+                  valueFrom:
+                    configMapKeyRef:
+                      name: messenger-config
+                      key: BACKUP_BUCKET
+                - name: KEEP
+                  value: "7"
+                - name: HEALTHCHECKS_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: pg-backup
+                      key: HEALTHCHECKS_URL
+                      optional: true
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  memory: 512Mi
