@@ -1,6 +1,6 @@
 # Cloudflare Pages headers. Replace api.example.com with the API hostname from your Cloudflare Tunnel.
-# script-src needs 'unsafe-inline' because Next's static export inlines its hydration scripts;
-# 'wasm-unsafe-eval' is for libsodium. Phase 6 tightens this with hashes.
+# 'unsafe-inline' in script-src is a placeholder: scripts/csp-hashes.mjs swaps it for the hashes of Next's
+# inlined hydration scripts after `next build`. 'wasm-unsafe-eval' is for libsodium.
 /*
   Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self' https://api.example.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
   X-Content-Type-Options: nosniff

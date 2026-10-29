@@ -150,7 +150,7 @@ All ids are UUIDv7. Emails are stored lowercased and trimmed.
 
 Full walkthrough, costs, and operations are in `DEPLOYMENT.md`. The shape:
 
-- The client is static files on Cloudflare Pages. `client/public/_headers` sets the CSP (`script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'`, the last for libsodium's WebAssembly), `frame-ancestors 'none'`, and `connect-src` limited to the API origin.
+- The client is static files on Cloudflare Pages. `client/public/_headers` sets the CSP: `script-src 'self' 'wasm-unsafe-eval'` (the last for libsodium's WebAssembly) plus a `sha256-` source per inline script, which `client/scripts/csp-hashes.mjs` computes from the exported HTML after `next build`; `frame-ancestors 'none'`; and `connect-src` limited to the API origin.
 - The API runs on a one-node GKE cluster behind a Cloudflare Tunnel. Nothing on the node listens to the internet; the `cloudflared` pod dials out and forwards to the `api` Service. A second, Spot-priced node pool scales from 0 to 3 for `api` pods when the first node is full.
 - `api` is a Deployment behind a HorizontalPodAutoscaler (1 to 6 replicas at 70% CPU) with a Prisma `migrate deploy` init container, a readiness probe on `/health`, and a PodDisruptionBudget. The image is multi-stage, runs as `node`, and ships only production dependencies plus `prisma` for the migration step.
 - Postgres 16 is a single StatefulSet with a 10 GiB persistent disk. A nightly CronJob runs `pg_dump`, checks the archive, uploads it to a GCS bucket, keeps the newest 7, and pings healthchecks.io. The sweep is a CronJob every 5 minutes.

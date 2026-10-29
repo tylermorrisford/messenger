@@ -97,7 +97,7 @@ Cloudflare dashboard > Workers & Pages > Create > Pages > Connect to Git > this 
 - Build output directory: `out`
 - Environment variables: `NEXT_PUBLIC_API_URL=https://api.yourdomain.com` and `NODE_VERSION=24`
 
-`NEXT_PUBLIC_API_URL` is baked in at build time; change it and redeploy, not the other way round. Add `app.yourdomain.com` under Custom domains, put that origin in `APP_ORIGIN`, and replace `api.example.com` in `client/public/_headers` with your API hostname. The CSP there allows inline scripts because Next's static export inlines its hydration script, and `wasm-unsafe-eval` for libsodium. Phase 6 tightens it with hashes.
+`NEXT_PUBLIC_API_URL` is baked in at build time; change it and redeploy, not the other way round. Add `app.yourdomain.com` under Custom domains, put that origin in `APP_ORIGIN`, and replace `api.example.com` in `client/public/_headers` with your API hostname. `pnpm build` runs `next build` and then `scripts/csp-hashes.mjs`, which rewrites `out/_headers` with a `sha256-` source for every inline script Next emitted in place of `'unsafe-inline'`; `wasm-unsafe-eval` stays for libsodium. Keep Rocket Loader, Email Address Obfuscation, and any other Cloudflare feature that rewrites HTML off for the app hostname, or the hashes stop matching and the console fills with "Refused to execute inline script".
 
 ## 7. Check it works
 
