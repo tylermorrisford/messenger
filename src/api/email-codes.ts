@@ -23,7 +23,7 @@ export async function issueEmailCode(email: string, purpose: EmailCodePurpose): 
 }
 
 export async function verifyEmailCode(email: string, purpose: EmailCodePurpose, code: string): Promise<string> {
-  const record = await prisma.emailCode.findFirst({
+  const record = await prisma.$primary().emailCode.findFirst({
     where: { email, purpose, consumedAt: null, expiresAt: { gt: new Date() } },
     orderBy: { createdAt: 'desc' },
   });

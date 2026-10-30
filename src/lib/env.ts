@@ -6,6 +6,7 @@ const schema = z
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
     PORT: z.coerce.number().int().positive().default(3000),
     DATABASE_URL: z.string().min(1),
+    DATABASE_REPLICA_URL: z.string().min(1).optional(),
     JWT_SECRET: z.string().min(32),
     // jsonwebtoken types expiresIn as an ms-style duration, so a plain string would not typecheck
     JWT_EXPIRES_IN: z.templateLiteral([z.number(), z.enum(['s', 'm', 'h', 'd'])]).default('15m'),

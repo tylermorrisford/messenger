@@ -105,6 +105,8 @@ Every conversation route first checks the caller is an active member (`leftAt` n
 
 Leaving sets `leftAt` and `needsRotation`. If the owner leaves, ownership passes to the longest-standing member.
 
+When `DATABASE_REPLICA_URL` is set, `@prisma/extension-read-replicas` sends reads outside transactions to the replica. Reads that decide a write (the session behind a refresh, the email code being verified, the key a signature is checked against) and the reads behind event fan-out call `prisma.$primary()`, so a lagging replica can't let a revoked session refresh or drop a notification. The user-facing reads that follow a create are the replica's problem to keep up with; `DEPLOYMENT.md` says how.
+
 ### Invites
 
 `POST /api/invites` (or `POST /api/conversations/:id/invites`) creates an `Invite` with a 7-day expiry, stores only the SHA-256 of the token, and emails a link containing the token through Resend. No key material travels by email. When the invitee signs up, one transaction consumes the invite, creates the user, and, for a conversation invite, adds them as a member with no key yet, then publishes `member_needs_key`. The next member whose tab is open wraps the current epoch key for the newcomer and posts it; the newcomer's thread shows a waiting state until then. Inviting someone who already has an account skips email: the inviter wraps the key for their public key directly.

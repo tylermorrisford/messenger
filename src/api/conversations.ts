@@ -1,10 +1,8 @@
 import { Prisma } from '@prisma/client';
-import { prisma } from '../lib/prisma.js';
+import { prisma, type Tx } from '../lib/prisma.js';
 import { HttpError } from '../lib/http-error.js';
 import { publish } from '../lib/notify.js';
 import { verifyEd25519 } from '../auth/auth.js';
-
-type Tx = Prisma.TransactionClient;
 
 export interface WrappedKey {
   recipientUserId: string;

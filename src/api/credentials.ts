@@ -47,7 +47,7 @@ function credentialColumns(update: CredentialUpdate, authHash: string) {
 }
 
 async function verifySignedUpdate(userId: string, update: SignedCredentialUpdate): Promise<void> {
-  const key = await prisma.userKey.findFirst({
+  const key = await prisma.$primary().userKey.findFirst({
     where: { userId, retiredAt: null },
     orderBy: { version: 'desc' },
     select: { ed25519Pub: true },

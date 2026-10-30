@@ -39,7 +39,7 @@ function serialize<T extends { seq: bigint }>({ seq, ...message }: T) {
 }
 
 export async function sendMessage(conversationId: string, userId: string, input: SendMessageInput) {
-  const senderKey = await prisma.userKey.findUnique({
+  const senderKey = await prisma.$primary().userKey.findUnique({
     where: { userId_version: { userId, version: input.senderKeyVersion }, retiredAt: null },
     select: { ed25519Pub: true },
   });
@@ -86,7 +86,7 @@ export async function sendMessage(conversationId: string, userId: string, input:
 }
 
 export async function findMessage(id: string) {
-  const message = await prisma.message.findUnique({ where: { id }, select: messageSelect });
+  const message = await prisma.$primary().message.findUnique({ where: { id }, select: messageSelect });
 
   return message ? serialize(message) : null;
 }

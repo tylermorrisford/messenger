@@ -175,6 +175,7 @@ Access tokens are 15-minute JWTs sent as `Authorization: Bearer`. The refresh to
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `DATABASE_URL` | required | PostgreSQL connection string |
+| `DATABASE_REPLICA_URL` | unset | A streaming replica. Reads outside transactions go here; writes, transactions, and reads that decide a write stay on `DATABASE_URL` |
 | `JWT_SECRET` | required | At least 32 characters |
 | `JWT_EXPIRES_IN` | `15m` | Access token lifetime |
 | `PORT` | `3000` | |

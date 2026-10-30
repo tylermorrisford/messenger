@@ -35,7 +35,7 @@ export async function rotateSession(refreshToken: string): Promise<RotatedSessio
   const hash = hashToken(refreshToken);
   const now = new Date();
 
-  const session = await prisma.session.findFirst({
+  const session = await prisma.$primary().session.findFirst({
     where: { OR: [{ refreshHash: hash }, { previousHash: hash }] },
   });
 

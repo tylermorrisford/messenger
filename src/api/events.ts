@@ -30,7 +30,7 @@ async function dispatch(notification: Notification): Promise<void> {
     return;
   }
 
-  const members = await prisma.conversationMember.findMany({
+  const members = await prisma.$primary().conversationMember.findMany({
     where: { conversationId: notification.conversationId, leftAt: null, userId: { in: [...handlers.keys()] } },
     select: { userId: true },
   });

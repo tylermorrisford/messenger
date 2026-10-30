@@ -1,6 +1,6 @@
 import pg from 'pg';
-import type { Prisma } from '@prisma/client';
 import { env } from './env.js';
+import type { Tx } from './prisma.js';
 
 const CHANNEL = 'messenger';
 const RECONNECT_MS = 2000;
@@ -20,7 +20,7 @@ let connecting: Promise<void> | null = null;
 let closed = false;
 
 /** Postgres holds the notification until the transaction commits, so a rolled-back change never gets announced */
-export async function publish(tx: Prisma.TransactionClient, notification: Notification): Promise<void> {
+export async function publish(tx: Tx, notification: Notification): Promise<void> {
   await tx.$executeRaw`SELECT pg_notify(${CHANNEL}, ${JSON.stringify(notification)})`;
 }
 
