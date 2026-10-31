@@ -170,8 +170,8 @@ model ConversationKey {
 }
 
 model Message {
-  id               String    @id @default(uuid(7))
-  seq              BigInt    @unique @default(autoincrement())
+  id               String    @default(uuid(7))
+  seq              BigInt    @default(autoincrement())
   conversationId   String
   senderId         String
   senderKeyVersion Int
@@ -186,6 +186,9 @@ model Message {
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   sender       User         @relation(fields: [senderId], references: [id], onDelete: Cascade)
 
+  // partitioned by month on createdAt, and Postgres wants the partition key in every unique constraint
+  @@id([id, createdAt])
+  @@unique([seq, createdAt])
   @@index([conversationId, seq])
   @@index([expiresAt])
   @@map("messages")

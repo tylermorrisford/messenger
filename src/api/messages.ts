@@ -86,7 +86,8 @@ export async function sendMessage(conversationId: string, userId: string, input:
 }
 
 export async function findMessage(id: string) {
-  const message = await prisma.$primary().message.findUnique({ where: { id }, select: messageSelect });
+  // the primary key is (id, createdAt) because of partitioning; the id alone is still unique
+  const message = await prisma.$primary().message.findFirst({ where: { id }, select: messageSelect });
 
   return message ? serialize(message) : null;
 }
@@ -123,4 +124,65 @@ export async function sweepExpired(): Promise<number> {
   } while (deleted === SWEEP_BATCH);
 
   return total;
+}
+
+function utcMonth(offset: number): Date {
+  const now = new Date();
+
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + offset, 1));
+}
+
+function partitionName(month: Date): string {
+  return `messages_${month.toISOString().slice(0, 7).replace('-', '_')}`;
+}
+
+/** Partitions for this month and next, so a sweep that misses a month boundary doesn't fail every send */
+export async function ensureMessagePartitions(): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    // two pods booting together would both pass IF NOT EXISTS and one would fail on the catalog insert
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('messages_partitions'))`;
+
+    for (const offset of [0, 1]) {
+      const from = utcMonth(offset).toISOString().slice(0, 10);
+      const to = utcMonth(offset + 1).toISOString().slice(0, 10);
+
+      await tx.$executeRawUnsafe(
+        `CREATE TABLE IF NOT EXISTS "${partitionName(utcMonth(offset))}" PARTITION OF "messages" FOR VALUES FROM ('${from}') TO ('${to}')`,
+      );
+    }
+  });
+}
+
+/**
+ * Drops past months in which every message has expired, and past months older than the retention cap
+ * even when some of their messages were set to never expire. Returns the partitions dropped.
+ */
+export async function dropMessagePartitions(retentionDays: number | undefined): Promise<string[]> {
+  const partitions = await prisma.$queryRaw<{ name: string }[]>`
+    SELECT c.relname AS name FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+    WHERE i.inhparent = 'messages'::regclass AND c.relname < ${partitionName(utcMonth(0))}
+    ORDER BY c.relname
+  `;
+  const cutoff = retentionDays === undefined ? null : Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  const dropped: string[] = [];
+
+  for (const { name } of partitions) {
+    const [year, month] = name.slice('messages_'.length).split('_').map(Number);
+    const end = Date.UTC(year, month, 1);
+
+    if (cutoff === null || end > cutoff) {
+      const [{ live }] = await prisma.$queryRawUnsafe<{ live: boolean }[]>(
+        `SELECT EXISTS (SELECT 1 FROM "${name}" WHERE "expiresAt" IS NULL OR "expiresAt" > now()) AS live`,
+      );
+
+      if (live) {
+        continue;
+      }
+    }
+
+    await prisma.$executeRawUnsafe(`DROP TABLE "${name}"`);
+    dropped.push(name);
+  }
+
+  return dropped;
 }

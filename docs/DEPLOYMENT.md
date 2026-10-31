@@ -149,6 +149,7 @@ This is the only lever that saves real money. Use it for any stretch of days whe
 | Machine type of the core node | `bootstrap.sh`, or a new pool | e2-small to e2-medium is +$12/month, and the fix if pods sit Pending for memory. |
 | Boot disk size | `--disk-size` in `bootstrap.sh` | About $0.10 per GB per month. 30 GB is already the floor for pd-balanced. |
 | `defaultTtlSeconds` | conversation settings in the app | Shorter lifetimes keep the database and the backups small. Not a cost lever at this size. |
+| `MESSAGE_RETENTION_DAYS` | `config.env` in the prod overlay | The sweep drops whole months of messages older than this, including ones set to never expire. Unset means messages live until their TTL. Same size caveat as `defaultTtlSeconds`. |
 
 ### Reading the bill
 

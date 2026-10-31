@@ -119,7 +119,9 @@ Writes call `publish(tx, ...)`, which runs `pg_notify('messenger', json)` inside
 
 ### Disappearing messages
 
-`expiresAt = createdAt + (message.ttlSeconds ?? conversation.defaultTtlSeconds)`; the default is 7 days and `null` means never. Reads filter expired rows, and the client hides a message at its expiry using the server's timestamp. `src/jobs/sweep.ts` deletes expired rows 1000 at a time; a CronJob runs it every 5 minutes. The sweep only reclaims space, so a missed run changes nothing visible.
+`expiresAt = createdAt + (message.ttlSeconds ?? conversation.defaultTtlSeconds)`; the default is 7 days and `null` means never. Reads filter expired rows, and the client hides a message at its expiry using the server's timestamp.
+
+`messages` is partitioned by month on `createdAt`, which is why its primary key is `(id, createdAt)`. `src/jobs/sweep.ts` runs as a CronJob every 5 minutes: it creates the partitions for this month and next (the API does the same when it starts, under an advisory lock), drops any past month in which every message has expired, then deletes the remaining expired rows 1000 at a time. With `MESSAGE_RETENTION_DAYS` set it also drops past months older than that, messages set to never expire included. Dropping a partition takes a short exclusive lock on `messages`, so it happens at most once a month per partition. Without the cap the sweep only reclaims space, so a missed run changes nothing visible.
 
 ### Endpoints
 
@@ -146,7 +148,7 @@ All ids are UUIDv7. Emails are stored lowercased and trimmed.
 | `Conversation` | group | `currentEpoch`, `defaultTtlSeconds`, `needsRotation`. `createdById` has no relation so the row outlives its creator. |
 | `ConversationMember` | membership | composite key, `role`, `leftAt` soft delete so "was this person a member at epoch N" stays answerable. |
 | `ConversationKey` | wrapped epoch keys | unique on `(conversationId, epoch, recipientUserId)`; distributor id has no relation so recipients keep their key if the distributor's account goes. |
-| `Message` | ciphertext | `seq` is a database sequence used as the paging cursor; indexed on `(conversationId, seq)` and on `expiresAt`. |
+| `Message` | ciphertext | `seq` is a database sequence used as the paging cursor; indexed on `(conversationId, seq)` and on `expiresAt`. Partitioned by month on `createdAt`, so the key is `(id, createdAt)` and lookups by id use `findFirst`. |
 
 ## Infrastructure
 

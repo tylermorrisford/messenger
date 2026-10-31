@@ -6,6 +6,7 @@ import morgan from 'morgan';
 import { env } from './lib/env.js';
 import { prisma } from './lib/prisma.js';
 import { HttpError } from './lib/http-error.js';
+import { ensureMessagePartitions } from './api/messages.js';
 import authRoutes from './routes/auth.routes.js';
 import inviteRoutes from './routes/invite.routes.js';
 import conversationRoutes from './routes/conversation.routes.js';
@@ -84,6 +85,9 @@ app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
       : err.message,
   });
 });
+
+// the sweep keeps partitions ahead too, but a pod that wakes after a long sleep can't wait for it
+await ensureMessagePartitions();
 
 // Start server
 if (env.NODE_ENV !== 'test') {

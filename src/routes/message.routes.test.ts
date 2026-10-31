@@ -1,8 +1,8 @@
 import request from 'supertest';
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import app from '../server.js';
 import { prisma } from '../lib/prisma.js';
-import { sweepExpired } from '../api/messages.js';
+import { dropMessagePartitions, ensureMessagePartitions, sweepExpired } from '../api/messages.js';
 import { addMember, auth, messageBody, rotateKey, signUp, startConversation, type TestUser } from '../test/helpers.js';
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -121,7 +121,7 @@ describe('GET /api/conversations/:id/messages', () => {
   it('hides expired messages', async () => {
     const expired = (await send(alice, messageBody(alice.signingKey, id))).body.data;
     const kept = (await send(alice, messageBody(alice.signingKey, id))).body.data;
-    await prisma.message.update({ where: { id: expired.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    await prisma.message.updateMany({ where: { id: expired.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
 
     const res = await list(alice);
 
@@ -143,11 +143,83 @@ describe('sweepExpired', () => {
   it('deletes only the expired rows', async () => {
     const expired = (await send(alice, messageBody(alice.signingKey, id))).body.data;
     const kept = (await send(bob, messageBody(bob.signingKey, id))).body.data;
-    await prisma.message.update({ where: { id: expired.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    await prisma.message.updateMany({ where: { id: expired.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
 
     expect(await sweepExpired()).toBe(1);
 
     const left = await prisma.message.findMany({ select: { id: true } });
     expect(left.map((message) => message.id)).toEqual([kept.id]);
+  });
+});
+
+describe('message partitions', () => {
+  const january = 'messages_2024_01';
+
+  function monthName(offset: number): string {
+    const now = new Date();
+    const month = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + offset, 1));
+
+    return `messages_${month.toISOString().slice(0, 7).replace('-', '_')}`;
+  }
+
+  async function partitionNames(): Promise<string[]> {
+    const rows = await prisma.$queryRaw<{ name: string }[]>`
+      SELECT c.relname AS name FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+      WHERE i.inhparent = 'messages'::regclass ORDER BY c.relname
+    `;
+
+    return rows.map((row) => row.name);
+  }
+
+  async function sendInJanuary(expiresAt: Date | null): Promise<void> {
+    await prisma.$executeRawUnsafe(
+      `CREATE TABLE IF NOT EXISTS "${january}" PARTITION OF "messages" FOR VALUES FROM ('2024-01-01') TO ('2024-02-01')`,
+    );
+    await prisma.message.create({
+      data: {
+        ...messageBody(alice.signingKey, id),
+        conversationId: id,
+        senderId: alice.userId,
+        createdAt: new Date('2024-01-15T12:00:00.000Z'),
+        expiresAt,
+      },
+    });
+  }
+
+  afterEach(async () => {
+    await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS "${january}"`);
+  });
+
+  it('creates this month and next, and can run again', async () => {
+    await ensureMessagePartitions();
+    await ensureMessagePartitions();
+
+    const names = await partitionNames();
+    expect(names).toContain(monthName(0));
+    expect(names).toContain(monthName(1));
+  });
+
+  it('drops a past month once every message in it has expired', async () => {
+    await sendInJanuary(new Date('2024-01-22T12:00:00.000Z'));
+
+    expect(await dropMessagePartitions(undefined)).toEqual([january]);
+    expect(await partitionNames()).not.toContain(january);
+  });
+
+  it('keeps a past month holding a message that never expires', async () => {
+    await sendInJanuary(null);
+
+    expect(await dropMessagePartitions(undefined)).toEqual([]);
+    expect(await partitionNames()).toContain(january);
+  });
+
+  it('drops a past month older than the retention cap even with live messages', async () => {
+    await sendInJanuary(null);
+
+    expect(await dropMessagePartitions(365)).toEqual([january]);
+
+    const names = await partitionNames();
+    expect(names).not.toContain(january);
+    expect(names).toContain(monthName(0));
   });
 });
