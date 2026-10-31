@@ -33,21 +33,13 @@ export async function generateIdentity(): Promise<IdentityKeys> {
   return { x25519Pub: box.publicKey, x25519Priv: box.privateKey, ed25519Pub: sign.publicKey, ed25519Priv: sign.privateKey };
 }
 
-// bundle plaintext is x25519Priv (32 bytes) ‖ ed25519Priv (64 bytes); public keys are recomputed on open
-export async function sealBundle(keys: IdentityKeys, key: Uint8Array): Promise<SealedBundle> {
-  await sodium.ready;
-  const nonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES);
-  const plaintext = new Uint8Array([...keys.x25519Priv, ...keys.ed25519Priv]);
-  const bundle = sodium.crypto_secretbox_easy(plaintext, nonce, key);
-  sodium.memzero(plaintext);
-
-  return { bundle: toBase64(bundle), nonce: toBase64(nonce) };
+/** Bundle plaintext is x25519Priv (32 bytes) ‖ ed25519Priv (64 bytes); the public keys are recomputed on open */
+export function identitySecrets(keys: IdentityKeys): Uint8Array {
+  return new Uint8Array([...keys.x25519Priv, ...keys.ed25519Priv]);
 }
 
-/** Throws when the key is wrong or the bundle was tampered with */
-export async function openBundle(sealed: SealedBundle, key: Uint8Array): Promise<IdentityKeys> {
-  await sodium.ready;
-  const plaintext = sodium.crypto_secretbox_open_easy(fromBase64(sealed.bundle), fromBase64(sealed.nonce), key);
+/** Rebuilds the identity from bundle plaintext and wipes the plaintext */
+export function identityFromSecrets(plaintext: Uint8Array): IdentityKeys {
   const x25519Priv = plaintext.slice(0, sodium.crypto_box_SECRETKEYBYTES);
   const ed25519Priv = plaintext.slice(sodium.crypto_box_SECRETKEYBYTES);
   sodium.memzero(plaintext);
@@ -58,6 +50,23 @@ export async function openBundle(sealed: SealedBundle, key: Uint8Array): Promise
     ed25519Priv,
     ed25519Pub: sodium.crypto_sign_ed25519_sk_to_pk(ed25519Priv),
   };
+}
+
+export async function sealBundle(keys: IdentityKeys, key: Uint8Array): Promise<SealedBundle> {
+  await sodium.ready;
+  const nonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES);
+  const plaintext = identitySecrets(keys);
+  const bundle = sodium.crypto_secretbox_easy(plaintext, nonce, key);
+  sodium.memzero(plaintext);
+
+  return { bundle: toBase64(bundle), nonce: toBase64(nonce) };
+}
+
+/** Throws when the key is wrong or the bundle was tampered with */
+export async function openBundle(sealed: SealedBundle, key: Uint8Array): Promise<IdentityKeys> {
+  await sodium.ready;
+
+  return identityFromSecrets(sodium.crypto_secretbox_open_easy(fromBase64(sealed.bundle), fromBase64(sealed.nonce), key));
 }
 
 export async function generateRecoveryKey(): Promise<Uint8Array> {

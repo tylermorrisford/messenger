@@ -5,11 +5,12 @@ import { getKdfParams, getUserById, loginUser, registerUser } from '../auth/user
 import { createSession, REFRESH_TTL_MS, revokeSession, rotateSession } from '../api/sessions.js';
 import { issueEmailCode, verifyEmailCode } from '../api/email-codes.js';
 import { changePassword, getRecoveryBundle, recoverAccount, resetIdentity } from '../api/credentials.js';
+import { approveDeviceLink, claimDeviceLink, getDeviceLinkStatus, getLinkingDevice, startDeviceLink } from '../api/device-links.js';
 import { authenticate, requireUser } from '../middleware/auth.middleware.js';
 import { credentialsLimiter, emailCodeLimiter } from '../middleware/rate-limit.middleware.js';
 import { env } from '../lib/env.js';
 import { HttpError } from '../lib/http-error.js';
-import { base64Schema, emailSchema, kdfSchema, key32Schema, signatureSchema, validateBody } from '../lib/validate.js';
+import { base64Schema, emailSchema, kdfSchema, key32Schema, linkIdSchema, signatureSchema, validateBody } from '../lib/validate.js';
 
 const router = Router();
 
@@ -229,6 +230,67 @@ router.post('/reset-identity', credentialsLimiter, validateBody(resetIdentitySch
 
   setRefreshCookie(res, session.refreshToken);
   res.json({ success: true, data: { accessToken: session.accessToken, user } });
+});
+
+const startLinkSchema = z.object({ linkId: linkIdSchema, ephemeralPub: key32Schema, mac: key32Schema });
+
+const approveLinkSchema = z.object({ sealedBundle: base64Schema, bundleMac: key32Schema });
+
+const claimLinkSchema = z.object({ signature: signatureSchema });
+
+function linkId(req: { params: Record<string, string> }): string {
+  const parsed = linkIdSchema.safeParse(req.params.id);
+
+  if (!parsed.success) {
+    throw new HttpError(400, 'Invalid link id');
+  }
+
+  return parsed.data;
+}
+
+/**
+ * POST /api/auth/link
+ * A new device announces itself: the hash of the code it shows, an ephemeral public key, and a MAC under the code
+ */
+router.post('/link', credentialsLimiter, validateBody(startLinkSchema), async (req, res): Promise<void> => {
+  res.status(201).json({ success: true, data: await startDeviceLink(req.body) });
+});
+
+/**
+ * GET /api/auth/link/:id
+ * The new device polls this until a signed-in device has posted the sealed bundle
+ */
+router.get('/link/:id', async (req, res): Promise<void> => {
+  res.json({ success: true, data: await getDeviceLinkStatus(linkId(req)) });
+});
+
+/**
+ * GET /api/auth/link/:id/device
+ * The ephemeral key and MAC a signed-in device checks against the code before sealing anything to it
+ */
+router.get('/link/:id/device', authenticate, async (req, res): Promise<void> => {
+  res.json({ success: true, data: await getLinkingDevice(linkId(req)) });
+});
+
+/**
+ * POST /api/auth/link/:id/approve
+ * A signed-in device hands over its identity keys sealed to the new device's ephemeral key
+ */
+router.post('/link/:id/approve', authenticate, validateBody(approveLinkSchema), async (req, res): Promise<void> => {
+  await approveDeviceLink(linkId(req), requireUser(req).userId, req.body);
+
+  res.status(204).end();
+});
+
+/**
+ * POST /api/auth/link/:id/claim
+ * The new device proves it opened the bundle by signing with the identity key, and gets a session
+ */
+router.post('/link/:id/claim', credentialsLimiter, validateBody(claimLinkSchema), async (req, res): Promise<void> => {
+  const { refreshToken, ...result } = await claimDeviceLink(linkId(req), req.body.signature, req.headers['user-agent']);
+
+  setRefreshCookie(res, refreshToken);
+  res.json({ success: true, data: result });
 });
 
 export default router;

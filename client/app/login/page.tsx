@@ -74,6 +74,9 @@ export default function LoginPage() {
         <Text>
           <Link href="/recover">Forgot your password?</Link>
         </Text>
+        <Text>
+          Signed in on another device? <Link href="/link">Link this one</Link> and skip the password.
+        </Text>
         <Text color="fg.subtle">New here? Ask a friend who uses Messenger for an invite.</Text>
       </Stack>
     </Box>

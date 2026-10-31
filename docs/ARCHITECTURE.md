@@ -51,6 +51,12 @@ Any request that replaces `authHash` or `keyBundle` (password change, recovery) 
 
 "I lost my password and my recovery key" is `POST /api/auth/reset-identity`: new identity keys, every session revoked, and the account leaves every conversation. The remaining members see a key change warning and re-add the person after checking the new safety number.
 
+### Device linking (`device-link.ts`)
+
+A new device can get the identity keys from a signed-in one without the password. The new device shows a 12-character base32 code (60 bits) and generates an ephemeral `crypto_box` key pair. It registers with the server under `linkId = BLAKE2b("messenger/device-link/v1\nid\n" + code)`, along with the ephemeral public key and a `crypto_auth` tag over that key under `macKey = BLAKE2b("messenger/device-link/v1\nmac\n" + code)`. The server stores only the hash, so it never learns the code, and the link lives five minutes, which bounds a brute force of the 60 bits.
+
+On the signed-in device the person types the code. That device derives the same `linkId`, fetches the ephemeral key, checks the tag (a server that swapped in its own key would fail here), then `crypto_box_seal`s the two private keys to the ephemeral key and posts them with a second tag under `macKey`. The new device polls, checks that tag, opens the box, and claims the link by signing `messenger/device-link/v1` plus the `linkId` with the recovered Ed25519 key. The server verifies the signature against the account's current `UserKey`, deletes the link (one claim per code), and starts a session. The server holds ciphertext it cannot open at every step, and the claim is gated by the same proof as a credential change.
+
 ### Conversation keys and epochs (`conversation.ts`)
 
 Each conversation has a symmetric key per epoch: 32 random bytes. The key is delivered to each member as a `ConversationKey` row: `crypto_box_seal(key, member.x25519Pub)`, plus an Ed25519 signature by whoever wrapped it over the conversation id, epoch, recipient, recipient key version, and the sealed bytes. The server verifies that signature and that the recipient key version is current; the client verifies it again against the distributor's key before unwrapping, because the server is not trusted to say who a key came from. Rows are signed one at a time, so adding a member never touches anyone else's row.
@@ -94,7 +100,7 @@ Express 5 with helmet, CORS pinned to `APP_ORIGIN` with credentials, zod for eve
 - Login: email plus `authKey`. Unknown email and wrong key get the same 401. Success returns an access token and sets the refresh cookie.
 - Access token: HS256 JWT, `sub` = user id, `sid` = session id, audience `access`, 15 minutes by default (`JWT_EXPIRES_IN`).
 - Refresh: random 32-byte token in the cookie, SHA-256 hash in `Session`. `POST /api/auth/refresh` rotates it. The previous token stays valid for 30 seconds so two tabs refreshing together don't trip reuse detection; a replay after that revokes the whole session. Sessions last 30 days. `DELETE /api/auth/refresh` is logout.
-- Rate limits (per client IP, counted in each API pod): 10 per 15 minutes across register, login, verify, recover, and reset-identity; 5 per 15 minutes for sending an email code; 20 invites per hour per user. Over the limit is a 429 with `RateLimit` and `Retry-After` headers. Behind the tunnel the client IP comes from `X-Forwarded-For`, so `trust proxy` is 1 in production.
+- Rate limits (per client IP, counted in each API pod): 10 per 15 minutes across register, login, verify, recover, reset-identity, and starting or claiming a device link; 5 per 15 minutes for sending an email code; 20 invites per hour per user. Over the limit is a 429 with `RateLimit` and `Retry-After` headers. Behind the tunnel the client IP comes from `X-Forwarded-For`, so `trust proxy` is 1 in production.
 
 ### Authorization and consistency
 
@@ -121,13 +127,13 @@ Writes call `publish(tx, ...)`, which runs `pg_notify('messenger', json)` inside
 
 `expiresAt = createdAt + (message.ttlSeconds ?? conversation.defaultTtlSeconds)`; the default is 7 days and `null` means never. Reads filter expired rows, and the client hides a message at its expiry using the server's timestamp.
 
-`messages` is partitioned by month on `createdAt`, which is why its primary key is `(id, createdAt)`. `src/jobs/sweep.ts` runs as a CronJob every 5 minutes: it creates the partitions for this month and next (the API does the same when it starts, under an advisory lock), drops any past month in which every message has expired, then deletes the remaining expired rows 1000 at a time. With `MESSAGE_RETENTION_DAYS` set it also drops past months older than that, messages set to never expire included. Dropping a partition takes a short exclusive lock on `messages`, so it happens at most once a month per partition. Without the cap the sweep only reclaims space, so a missed run changes nothing visible.
+`messages` is partitioned by month on `createdAt`, which is why its primary key is `(id, createdAt)`. `src/jobs/sweep.ts` runs as a CronJob every 5 minutes: it creates the partitions for this month and next (the API does the same when it starts, under an advisory lock), drops any past month in which every message has expired, then deletes the remaining expired rows 1000 at a time, and finally deletes expired device links. With `MESSAGE_RETENTION_DAYS` set it also drops past months older than that, messages set to never expire included. Dropping a partition takes a short exclusive lock on `messages`, so it happens at most once a month per partition. Without the cap the sweep only reclaims space, so a missed run changes nothing visible.
 
 ### Endpoints
 
 | Area | Endpoints |
 |---|---|
-| Auth | `GET /api/auth/params`, `POST register`, `POST login`, `POST`/`DELETE refresh`, `POST email-code`, `POST verify`, `GET me`, `PUT password`, `POST recover/bundle`, `POST recover`, `POST reset-identity` |
+| Auth | `GET /api/auth/params`, `POST register`, `POST login`, `POST`/`DELETE refresh`, `POST email-code`, `POST verify`, `GET me`, `PUT password`, `POST recover/bundle`, `POST recover`, `POST reset-identity`, `POST link`, `GET link/:id`, `GET link/:id/device`, `POST link/:id/approve`, `POST link/:id/claim` |
 | Users | `GET /api/users?email=` (public keys for a friend), `GET /api/users/:id/keys` (key history) |
 | Invites | `POST /api/invites`, `GET /api/invites/:token` |
 | Conversations | `POST`/`GET /api/conversations`, `GET`/`PATCH /:id`, `POST /:id/members`, `POST /:id/invites`, `POST /:id/leave`, `POST /:id/rotate`, `GET`/`POST /:id/keys`, `GET`/`POST /:id/messages` |
@@ -144,6 +150,7 @@ All ids are UUIDv7. Emails are stored lowercased and trimmed.
 | `UserKey` | public key history | `(userId, version)` unique; `retiredAt` instead of delete. |
 | `Session` | refresh tokens | `refreshHash` unique, `previousHash` + `rotatedAt` for the grace window, `revokedAt`. |
 | `EmailCode` | one-time codes | hash, expiry, attempt counter, `consumedAt`. |
+| `DeviceLink` | pending device links | id is the new device's hash of the code; ephemeral key and tag, then the approver's sealed keys and tag; five-minute expiry, deleted on claim or by the sweep. |
 | `Invite` | sign-up links | token hash only; optional conversation; cascades if the inviter's account goes. |
 | `Conversation` | group | `currentEpoch`, `defaultTtlSeconds`, `needsRotation`. `createdById` has no relation so the row outlives its creator. |
 | `ConversationMember` | membership | composite key, `role`, `leftAt` soft delete so "was this person a member at epoch N" stays answerable. |
@@ -165,7 +172,7 @@ Full walkthrough, costs, and operations are in `DEPLOYMENT.md`. The shape:
 
 - The server sees metadata: membership, timing, message sizes, and IP addresses in its logs.
 - No forward secrecy inside an epoch. An epoch key leaked from a member's browser decrypts every message of that epoch that still exists; the lifetime default and rotation on membership change are the mitigation.
-- Multi-device works by logging in with the password on each device, which downloads and opens the key bundle. Linking a new device from an existing one without the password is not built.
+- Device linking uses a typed code and a 2-second poll, not a QR code or a push. The signed-in device cannot see which device it is approving beyond the code matching, so the person approving has to be the one who typed it.
 - Login requires the password; the `LOGIN` email code purpose exists in the schema but has no endpoint.
 - Rate limit counters are per API pod, so the effective limit is the configured number times the replica count. A shared store (Postgres or Redis) is the upgrade if that matters.
 - One Postgres, no standby, nightly backups: the recovery point is up to 24 hours. `DEPLOYMENT.md` describes the step up to CloudNativePG.

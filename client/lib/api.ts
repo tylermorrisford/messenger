@@ -1,4 +1,5 @@
 import type { KdfParams } from '@/lib/crypto/kdf';
+import type { LinkRequest, SealedForDevice } from '@/lib/crypto/device-link';
 import type { CredentialUpdate } from '@/lib/crypto/keys';
 import type { WrappedKey } from '@/lib/crypto/conversation';
 import type { EncryptedMessage } from '@/lib/crypto/message';
@@ -22,6 +23,13 @@ export interface LoginResult extends Session {
   keyBundleNonce: string;
   keys: { version: number; x25519Pub: string; ed25519Pub: string };
 }
+
+/** What a device linked without a password gets back: no bundle, since the keys arrived sealed to it directly */
+export interface LinkedSession extends Session {
+  keys: { version: number; x25519Pub: string; ed25519Pub: string };
+}
+
+export type DeviceLinkStatus = { approved: false } | { approved: true; sealedBundle: string; bundleMac: string };
 
 export interface UserKey {
   version: number;
@@ -325,6 +333,33 @@ class ApiClient {
 
   async resetIdentity(input: ResetIdentityInput): Promise<Session> {
     const session = await this.request<Session>('/api/auth/reset-identity', { method: 'POST', body: input, auth: false });
+    this.accessToken = session.accessToken;
+
+    return session;
+  }
+
+  startDeviceLink(input: LinkRequest): Promise<{ expiresAt: string }> {
+    return this.request('/api/auth/link', { method: 'POST', body: input, auth: false });
+  }
+
+  getDeviceLink(linkId: string): Promise<DeviceLinkStatus> {
+    return this.request(`/api/auth/link/${encodeURIComponent(linkId)}`, { auth: false });
+  }
+
+  getLinkingDevice(linkId: string): Promise<{ ephemeralPub: string; mac: string }> {
+    return this.request(`/api/auth/link/${encodeURIComponent(linkId)}/device`);
+  }
+
+  approveDeviceLink(linkId: string, input: SealedForDevice): Promise<void> {
+    return this.request(`/api/auth/link/${encodeURIComponent(linkId)}/approve`, { method: 'POST', body: input });
+  }
+
+  async claimDeviceLink(linkId: string, signature: string): Promise<LinkedSession> {
+    const session = await this.request<LinkedSession>(`/api/auth/link/${encodeURIComponent(linkId)}/claim`, {
+      method: 'POST',
+      body: { signature },
+      auth: false,
+    });
     this.accessToken = session.accessToken;
 
     return session;

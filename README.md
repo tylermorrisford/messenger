@@ -11,7 +11,7 @@ messenger/
 ├── docker-compose.yml      # Dev and test PostgreSQL containers
 ├── Dockerfile              # Multi-stage production image
 ├── prisma/
-│   ├── schema.prisma       # User, UserKey, Session, EmailCode, Invite
+│   ├── schema.prisma       # User, UserKey, Session, EmailCode, Invite, DeviceLink, conversations, messages
 │   └── migrations/
 ├── src/
 │   ├── lib/
@@ -26,6 +26,7 @@ messenger/
 │   ├── api/
 │   │   ├── sessions.ts     # Refresh token rotation
 │   │   ├── email-codes.ts  # 6-digit email codes -> short-lived proofs
+│   │   ├── device-links.ts # Link a new device from a signed-in one
 │   │   └── invites.ts      # Invite links
 │   ├── routes/             # Express routers + supertest specs
 │   ├── middleware/
@@ -157,6 +158,11 @@ Base URL: `http://localhost:3000`. Every response is `{ success, data }` or `{ s
 | `POST` | `/api/auth/recover/bundle` | `RECOVER` proof | The key bundle sealed under the recovery key |
 | `POST` | `/api/auth/recover` | `RECOVER` proof | Forgot password: new credentials signed by the recovered identity key; logs out everywhere |
 | `POST` | `/api/auth/reset-identity` | `RECOVER` proof | Lost recovery key: new identity keys, old ones retired, logs out everywhere |
+| `POST` | `/api/auth/link` | none | A new device registers the hash of the code it shows, an ephemeral public key, and a MAC under the code |
+| `GET` | `/api/auth/link/:id` | none | The new device polls for the sealed keys; 404 once the link expires or is claimed |
+| `GET` | `/api/auth/link/:id/device` | Bearer | The ephemeral key and MAC to check against the typed code |
+| `POST` | `/api/auth/link/:id/approve` | Bearer | Identity keys sealed to the new device's ephemeral key, plus a MAC under the code |
+| `POST` | `/api/auth/link/:id/claim` | none | Signature over the link id by the identity key; starts a session and deletes the link |
 
 ### Invites and users
 

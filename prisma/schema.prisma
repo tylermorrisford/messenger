@@ -31,6 +31,7 @@ model User {
   memberships     ConversationMember[]
   conversationKeys ConversationKey[]
   messages        Message[]
+  deviceLinks     DeviceLink[]
 
   @@map("users")
 }
@@ -67,6 +68,23 @@ model Session {
   @@index([userId])
   @@index([previousHash])
   @@map("sessions")
+}
+
+model DeviceLink {
+  // the new device's hash of the code it shows; the code itself never reaches the server
+  id           String    @id
+  ephemeralPub String
+  mac          String
+  userId       String?
+  sealedBundle String?
+  bundleMac    String?
+  expiresAt    DateTime
+  createdAt    DateTime  @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("device_links")
 }
 
 enum EmailCodePurpose {

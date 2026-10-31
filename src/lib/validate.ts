@@ -39,3 +39,6 @@ export const kdfSchema = z.object({
   memLimit: z.int().positive(),
   opsLimit: z.int().positive(),
 });
+
+// 32-byte BLAKE2b hash, hex so it can sit in a URL path
+export const linkIdSchema = z.string().regex(/^[0-9a-f]{64}$/);
